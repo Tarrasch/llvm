@@ -1,70 +1,3 @@
-//===- Hello.cpp - Example code from "Writing an LLVM Pass" ---------------===//
-//
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
-//
-//===----------------------------------------------------------------------===//
-//
-// This file implements two versions of the LLVM "Hello World" pass described
-// in docs/WritingAnLLVMPass.html
-//
-//===----------------------------------------------------------------------===//
-
-#define DEBUG_TYPE "hello"
-#include "llvm/Pass.h"
-#include "llvm/Function.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/ADT/Statistic.h"
-using namespace llvm;
-
-STATISTIC(HelloCounter, "Counts number of functions greeted");
-
-namespace {
-  // Hello - The first implementation, without getAnalysisUsage.
-  struct Hello : public FunctionPass {
-    static char ID; // Pass identification, replacement for typeid
-    Hello() : FunctionPass(ID) {}
-
-    virtual bool runOnFunction(Function &F) {
-      ++HelloCounter;
-      errs() << "Hello: ";
-      errs().write_escaped(F.getName()) << '\n';
-      return false;
-    }
-  };
-}
-
-char Hello::ID = 0;
-static RegisterPass<Hello> X("hello", "Hello World Pass");
-
-namespace {
-  // Hello2 - The second implementation with getAnalysisUsage implemented.
-  struct Hello2 : public FunctionPass {
-    static char ID; // Pass identification, replacement for typeid
-    Hello2() : FunctionPass(ID) {}
-
-    virtual bool runOnFunction(Function &F) {
-      ++HelloCounter;
-      errs() << "Hello: ";
-      errs().write_escaped(F.getName()) << '\n';
-      return false;
-    }
-
-    // We don't modify the program, so we preserve all analyses
-    virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-      AU.setPreservesAll();
-    }
-  };
-}
-
-char Hello2::ID = 0;
-static RegisterPass<Hello2>
-Y("hello2", "Hello World Pass (with getAnalysisUsage implemented)");
-
-// "end of original file hello.cpp"
-
 #include "llvm/IRBuilder.h"
 #include "llvm/Intrinsics.h"
 #include "llvm/Pass.h"
@@ -80,6 +13,9 @@ Y("hello2", "Hello World Pass (with getAnalysisUsage implemented)");
 #include "llvm/Transforms/Instrumentation.h"
 using namespace llvm;
 
+#include <map>
+using namespace std;
+
 static cl::opt<bool> SingleTrapBB("bounds-checking-single-trap-2",
                                   cl::desc("Use one trap block per function"));
 
@@ -90,6 +26,13 @@ STATISTIC(ChecksUnable, "Bounds checks unable to add");
 typedef IRBuilder<true, TargetFolder> BuilderTy;
 
 namespace {
+  struct CheckPoint {
+    Value *name;
+    Value *bound;
+    bool isUpper;
+    Instruction *point;
+  };
+
   struct BoundsChecking : public FunctionPass {
     static char ID;
 
@@ -103,6 +46,8 @@ namespace {
       AU.addRequired<DataLayout>();
       AU.addRequired<TargetLibraryInfo>();
     }
+
+    map< BasicBlock*, CheckPoint > checkpoints;
 
   private:
     const DataLayout *TD;
@@ -159,7 +104,7 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
     if (!C->getZExtValue())
       return;
     else
-      Cmp = 0; // unconditional branch
+      Cmp = NULL; // unconditional branch
   }
   errs() << "Got here" << "\n";
 
