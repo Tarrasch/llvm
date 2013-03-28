@@ -13,6 +13,10 @@
 #include "llvm/Transforms/Instrumentation.h"
 using namespace llvm;
 
+#define tr(it, c) \
+  for (typeof((c).begin()) it = (c).begin(); it != (c).end(); it++)
+#define tr_lu(it, c, key) \
+  for (typeof((c).lower_bound(key)) it = (c).lower_bound(key); it != (c).upper_bound(key); it++)
 #include <map>
 using namespace std;
 
@@ -27,10 +31,13 @@ typedef IRBuilder<true, TargetFolder> BuilderTy;
 
 namespace {
   struct CheckPoint {
-    Value *name;
-    Value *bound;
+    Value* name;
+    ConstantInt* bound;
     bool isUpper;
     Instruction *point;
+
+    CheckPoint(Value* n, ConstantInt* b, bool i, Instruction* p) 
+      : name(n), bound(b), isUpper(i), point(p) {}
   };
 
   struct BoundsChecking : public FunctionPass {
@@ -47,7 +54,7 @@ namespace {
       AU.addRequired<TargetLibraryInfo>();
     }
 
-    map< BasicBlock*, CheckPoint > checkpoints;
+    multimap< BasicBlock*, CheckPoint > checkpoints;
 
   private:
     const DataLayout *TD;
@@ -63,6 +70,8 @@ namespace {
     bool computeAllocSize(Value *Ptr, APInt &Offset, Value* &OffsetValue,
                           APInt &Size, Value* &SizeValue);
     bool instrument(Value *Ptr, Value *Val);
+    void addChecks(Value *Ptr, Value* InstVal, Instruction *Inst);
+    bool syntesize(CheckPoint c);
  };
 }
 
@@ -100,6 +109,7 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   // check if the comparison is always false
   ConstantInt *C = dyn_cast_or_null<ConstantInt>(Cmp);
   if (C) {
+    errs() << "Skipping check" << "\n";
     ++ChecksSkipped;
     if (!C->getZExtValue())
       return;
@@ -133,7 +143,7 @@ bool BoundsChecking::instrument(Value *Ptr, Value *InstVal) {
   SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
 
   if (!ObjSizeEval->bothKnown(SizeOffset)) {
-    errs() << "No, both are known .." << "\n";
+    errs() << "No, both are not known .." << "\n";
     ++ChecksUnable;
     return false;
   }
@@ -166,6 +176,63 @@ bool BoundsChecking::instrument(Value *Ptr, Value *InstVal) {
   return true;
 }
 
+bool BoundsChecking::syntesize(CheckPoint c) {
+
+  // three checks are required to ensure safety:
+  // . Offset >= 0  (since the offset is given from the base ptr)
+  // . Size >= Offset  (unsigned)
+  // . Size - Offset >= NeededSize  (unsigned)
+  //
+  // optimization: if Size >= 0 (signed), skip 1st check
+  // FIXME: add NSW/NUW here?  -- we dont care if the subtraction overflows
+  Value *Cmp;
+  if(c.isUpper) {
+    Cmp = Builder->CreateICmpULT(c.bound, c.name);
+    errs() << "Syntesiezing ubound\n";
+  } else {
+    Cmp = Builder->CreateICmpULT(c.name, c.bound);
+    errs() << "Syntesiezing lbound\n";
+  }
+  emitBranchToTrap(Cmp);
+
+  ++ChecksAdded;
+  return true;
+}
+
+void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
+  //uint64_t NeededSize = TD->getTypeStoreSize(InstVal->getType());
+  //errs() << "Instrument " << *Ptr << " for " << Twine(NeededSize)
+  //            << " bytes\n";
+
+  SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
+
+  if (!ObjSizeEval->bothKnown(SizeOffset)) {
+    errs() << "No, both are known .." << "\n";
+    ++ChecksUnable;
+    return;
+  }
+
+  Value *Size   = SizeOffset.first;
+  Value *Offset = SizeOffset.second;
+  ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
+  ConstantInt *OffsetCI = dyn_cast<ConstantInt>(Offset);
+  if (OffsetCI && OffsetCI->getValue() == 0) {
+    //TODO: add more extensive checks
+    return;
+  }
+
+  Type *IntTy = TD->getIntPtrType(Ptr->getType());
+  //Value *NeededSizeVal = ConstantInt::get(IntTy, NeededSize);
+  BasicBlock *BB = Inst->getParent();
+  /* checkpoints[BB].add(new CheckPoint(Offset, Size - NeededSizeVal, True, Inst)); */
+  checkpoints.insert(make_pair(BB,CheckPoint(Offset, SizeCI, true, Inst)));
+  errs() << "Adding ubound\n";
+  if (!OffsetCI || OffsetCI->getValue().slt(0)) {
+    checkpoints.insert(make_pair(BB,CheckPoint(Offset, dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0)), false, Inst)));
+    errs() << "Adding lbound\n";
+  }
+}
+
 bool BoundsChecking::runOnFunction(Function &F) {
   errs() << "Wohoo, started BoundsChecking: ";
   errs().write_escaped(F.getName()) << '\n';
@@ -189,7 +256,53 @@ bool BoundsChecking::runOnFunction(Function &F) {
   }
 
   bool MadeChange = false;
+  for (std::vector<Instruction*>::iterator i = WorkList.begin(),
+       e = WorkList.end(); i != e; ++i) {
+    Inst = *i;
+
+    if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
+      addChecks(LI->getPointerOperand(), LI, Inst);
+    } else if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
+      addChecks(SI->getPointerOperand(), SI, Inst);
+    } else if (AtomicCmpXchgInst *AI = dyn_cast<AtomicCmpXchgInst>(Inst)) {
+      addChecks(AI->getPointerOperand(), AI, Inst);
+    } else if (AtomicRMWInst *AI = dyn_cast<AtomicRMWInst>(Inst)) {
+      addChecks(AI->getPointerOperand(), AI, Inst);
+    } else {
+      llvm_unreachable("unknown Instruction type");
+    }
+  }
+
+  tr(it,F) {
+    tr_lu(i,checkpoints,&*it) {
+      CheckPoint a = i->second;
+      a.name->dump();
+
+      for (typeof(i) j = checkpoints.lower_bound(&*it); j != i; j++) {
+        CheckPoint a = i->second;
+        CheckPoint b = j->second;
+        errs() << "apa\n";
+        if(a.name == b.name) {
+          errs() << "bepa\n";
+          if(a.isUpper == b.isUpper) {
+            errs() << "cepa\n";
+            if(a.bound->getValue() == b.bound->getValue()) {
+              checkpoints.erase(j);
+              errs() << "Tog bort\n";
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (typeof(checkpoints.begin()) it=checkpoints.begin(); it!=checkpoints.end(); ++it) {
+    CheckPoint c = it->second;
+    Builder->SetInsertPoint(c.point);
+    MadeChange |= syntesize(c);
+  }
   /* errs() << "Size :   " << WorkList.size() << " !!" << endl; */
+  /*
   for (std::vector<Instruction*>::iterator i = WorkList.begin(),
        e = WorkList.end(); i != e; ++i) {
     Inst = *i;
@@ -207,6 +320,7 @@ bool BoundsChecking::runOnFunction(Function &F) {
       llvm_unreachable("unknown Instruction type");
     }
   }
+  */
   return MadeChange;
 }
 
