@@ -108,14 +108,14 @@ BasicBlock *BoundsChecking::getTrapBB() {
 void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   // check if the comparison is always false
   ConstantInt *C = dyn_cast_or_null<ConstantInt>(Cmp);
-  if (C) {
-    errs() << "Skipping check" << "\n";
-    ++ChecksSkipped;
-    if (!C->getZExtValue())
-      return;
-    else
-      Cmp = NULL; // unconditional branch
-  }
+  /* if (C) { */
+  /*   errs() << "Skipping check" << "\n"; */
+  /*   ++ChecksSkipped; */
+  /*   if (!C->getZExtValue()) */
+  /*     return; */
+  /*   else */
+  /*     Cmp = NULL; // unconditional branch */
+  /* } */
   errs() << "Got here" << "\n";
 
   Instruction *Inst = Builder->GetInsertPoint();
@@ -287,8 +287,9 @@ bool BoundsChecking::runOnFunction(Function &F) {
           if(a.isUpper == b.isUpper) {
             errs() << "cepa\n";
             if(a.bound->getValue() == b.bound->getValue()) {
-              checkpoints.erase(j);
+              checkpoints.erase(i);
               errs() << "Tog bort\n";
+              break;
             }
           }
         }
