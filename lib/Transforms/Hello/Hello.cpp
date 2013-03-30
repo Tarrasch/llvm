@@ -72,7 +72,6 @@ namespace {
     void emitBranchToTrap(Value *Cmp = 0);
     bool computeAllocSize(Value *Ptr, APInt &Offset, Value* &OffsetValue,
                           APInt &Size, Value* &SizeValue);
-    bool instrument(Value *Ptr, Value *Val);
     void addChecks(Value *Ptr, Value* InstVal, Instruction *Inst);
     bool syntesize(CheckPoint c);
  };
@@ -129,53 +128,6 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
     BranchInst::Create(getTrapBB(), Cont, Cmp, OldBB);
   else
     BranchInst::Create(getTrapBB(), OldBB);
-}
-
-
-/// instrument - adds run-time bounds checks to memory accessing instructions.
-/// Ptr is the pointer that will be read/written, and InstVal is either the
-/// result from the load or the value being stored. It is used to determine the
-/// size of memory block that is touched.
-/// Returns true if any change was made to the IR, false otherwise.
-bool BoundsChecking::instrument(Value *Ptr, Value *InstVal) {
-  uint64_t NeededSize = TD->getTypeStoreSize(InstVal->getType());
-  errs() << "Instrument " << *Ptr << " for " << Twine(NeededSize)
-              << " bytes\n";
-
-  SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
-
-  if (!ObjSizeEval->bothKnown(SizeOffset)) {
-    errs() << "No, both are not known .." << "\n";
-    ++ChecksUnable;
-    return false;
-  }
-
-  Value *Size   = SizeOffset.first;
-  Value *Offset = SizeOffset.second;
-  ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
-
-  Type *IntTy = TD->getIntPtrType(Ptr->getType());
-  Value *NeededSizeVal = ConstantInt::get(IntTy, NeededSize);
-
-  // three checks are required to ensure safety:
-  // . Offset >= 0  (since the offset is given from the base ptr)
-  // . Size >= Offset  (unsigned)
-  // . Size - Offset >= NeededSize  (unsigned)
-  //
-  // optimization: if Size >= 0 (signed), skip 1st check
-  // FIXME: add NSW/NUW here?  -- we dont care if the subtraction overflows
-  Value *ObjSize = Builder->CreateSub(Size, Offset);
-  Value *Cmp2 = Builder->CreateICmpULT(Size, Offset);
-  Value *Cmp3 = Builder->CreateICmpULT(ObjSize, NeededSizeVal);
-  Value *Or = Builder->CreateOr(Cmp2, Cmp3);
-  if (!SizeCI || SizeCI->getValue().slt(0)) {
-    Value *Cmp1 = Builder->CreateICmpSLT(Offset, ConstantInt::get(IntTy, 0));
-    Or = Builder->CreateOr(Cmp1, Or);
-  }
-  emitBranchToTrap(Or);
-
-  ++ChecksAdded;
-  return true;
 }
 
 bool BoundsChecking::syntesize(CheckPoint c) {
