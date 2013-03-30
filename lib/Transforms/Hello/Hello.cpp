@@ -17,6 +17,8 @@ using namespace llvm;
 
 #define tr(it, c) \
   for (typeof((c).begin()) it = (c).begin(); it != (c).end(); it++)
+#define tr_pred(it, c) \
+  for (typeof((c).pred_begin()) it = (c).pred_begin(); it != (c).pred_end(); it++)
 #define tr_lu(it, c, key) \
   for (typeof((c).lower_bound(key)) it = (c).lower_bound(key); it != (c).upper_bound(key); it++)
 #include <map>
@@ -33,6 +35,14 @@ STATISTIC(ChecksSkipped, "Bounds checks skipped");
 STATISTIC(ChecksUnable, "Bounds checks unable to add");
 
 typedef IRBuilder<true, TargetFolder> BuilderTy;
+
+/* template <class InputIterator1, class InputIterator2, */
+/*           class OutputIterator, class Compare> */
+/*   OutputIterator set_union (InputIterator1 first1, InputIterator1 last1, */
+/*                             InputIterator2 first2, InputIterator2 last2, */
+/*                             OutputIterator result, Compare comp); */
+
+/* bool compare */
 
 namespace {
   struct CheckPoint {
@@ -90,8 +100,11 @@ namespace {
                           APInt &Size, Value* &SizeValue);
     void addChecks(Value *Ptr, Value* InstVal, Instruction *Inst);
     void addAllChecks(Function &F);
-    void localElimination(Function &F);
     bool synthesize(CheckPoint c);
+
+    // Passes
+    void localElimination(Function &F);
+    void redundancyElimination(Function &F);
  };
 }
 
@@ -330,6 +343,48 @@ void BoundsChecking::localElimination(Function &F) {
   }
 }
 
+vector < CheckPoint > forward(vector < CheckPoint > arg) {
+  return arg;
+}
+
+void redundancyElimination(Function &F) {
+  map< BasicBlock*, vector< CheckPoint > > c_out;
+  bool change = true;
+  while(change) {
+    change = false;
+    tr(it, F) {
+      BasicBlock *BB = &(*it);
+      vector< CheckPoint > c_in;
+      bool first = true;
+      tr_pred(prit, *BB) {
+        if(first) { first=false; c_in = c_out[*prit]; }
+        else c_in = cp_intersect(c_in, c_out[*prit]);
+      }
+      vector< CheckPoint > new_c_out = cp_union(checkpoints[BB], forward(c_in));
+      change |= c_out[BB].size() != cp_intersect(c_out[BB], new_c_out).size();
+      c_out[BB] = new_c_out;
+    }
+  }
+  tr(it, F) {
+    BasicBlock *BB = &(*it);
+    vector< CheckPoint > c_in;
+    bool first = true;
+    tr_pred(prit, *BB) {
+      if(first) { first=false; c_in = c_out[*prit]; }
+      else c_in = cp_intersect(c_in, c_out[*prit]);
+    }
+    tr(c, checkpoints[BB]) {
+      tr(c_prime, c_in) {
+        if(is_subsumed(*c, *c_prime)){
+          checkpoints[BB].erase(c);
+          c--;
+          break;
+        }
+      }
+    }
+  }
+}
+
 bool BoundsChecking::runOnFunction(Function &F) {
   TD = &getAnalysis<DataLayout>();
   TLI = &getAnalysis<TargetLibraryInfo>();
@@ -345,6 +400,7 @@ bool BoundsChecking::runOnFunction(Function &F) {
   addAllChecks(F);
 
   localElimination(F);
+  redundancyElimination(F);
 
   bool MadeChange = false;
   tr(it, checkpoints) {

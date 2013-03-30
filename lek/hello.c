@@ -19,19 +19,25 @@
 #include <stdio.h>
 
 int main(){
-  int arr[2];
-  int b = 123;
-  arr[b];
-  /* a = arr[17+b]; */
-  /* int a; */
-  /* int b = 5; */
-  /* printf("%d\n", b); */
+
 }
 
-/* unsigned int sum(unsigned int a){ */
-/*   unsigned int acc = 0; */
-/*   for(unsigned int i = 0; i < a; i++){ */
-/*     acc+=i; */
-/*   } */
-/*   return acc; */
+int ifthen(const int i, int b) {
+  int arr[201];
+  int sum;
+  if (b) {
+    sum = arr[i-10];
+    sum = arr[i+150];
+  } else {
+    sum = arr[i-20];
+    sum = arr[i+100];
+  }
+  sum = arr[i-5];
+  sum = arr[i];
+  return sum;
+}
+
+/* int access(int b){ */
+/*   int arr[100]; */
+/*   return arr[b] + arr[b+1]; */
 /* } */
