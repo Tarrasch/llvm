@@ -41,6 +41,16 @@ namespace {
 
     CheckPoint(Value* n, ConstantInt* b, bool i, Instruction* p) 
       : name(n), bound(b), isUpper(i), point(p) {}
+
+    int getIndex() {
+      BasicBlock *bb = point->getParent();
+      int i = 0;
+      tr(it, *bb){
+        if(&(*it) == point) return i;
+        i++;
+      }
+      assert(false);
+    }
   };
 
   struct BoundsChecking : public FunctionPass {
@@ -73,7 +83,9 @@ namespace {
     bool computeAllocSize(Value *Ptr, APInt &Offset, Value* &OffsetValue,
                           APInt &Size, Value* &SizeValue);
     void addChecks(Value *Ptr, Value* InstVal, Instruction *Inst);
-    bool syntesize(CheckPoint c);
+    void addAllChecks(Function &F);
+    void localElimination(Function &F);
+    bool synthesize(CheckPoint c);
  };
 }
 
@@ -130,7 +142,7 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
     BranchInst::Create(getTrapBB(), OldBB);
 }
 
-bool BoundsChecking::syntesize(CheckPoint c) {
+bool BoundsChecking::synthesize(CheckPoint c) {
 
   // three checks are required to ensure safety:
   // . Offset >= 0  (since the offset is given from the base ptr)
@@ -141,6 +153,7 @@ bool BoundsChecking::syntesize(CheckPoint c) {
   // FIXME: add NSW/NUW here?  -- we dont care if the subtraction overflows
   Value *Cmp;
   if(c.isUpper) {
+    // TODO: check edge cases
     Cmp = Builder->CreateICmpULT(c.bound, c.name);
     /* errs() << "Syntesiezing ubound\n"; */
   } else {
@@ -251,20 +264,7 @@ void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
   }
 }
 
-bool BoundsChecking::runOnFunction(Function &F) {
-  errs() << "Wohoo, started BoundsChecking: ";
-  errs().write_escaped(F.getName()) << '\n';
-  TD = &getAnalysis<DataLayout>();
-  TLI = &getAnalysis<TargetLibraryInfo>();
-
-  TrapBB = 0;
-  BuilderTy TheBuilder(F.getContext(), TargetFolder(TD));
-  Builder = &TheBuilder;
-  ObjectSizeOffsetEvaluator TheObjSizeEval(TD, TLI, F.getContext());
-  ObjSizeEval = &TheObjSizeEval;
-
-  // check HANDLE_MEMORY_INST in include/llvm/Instruction.def for memory
-  // touching instructions
+void BoundsChecking::addAllChecks(Function &F) {
   std::vector<Instruction*> WorkList;
   for (inst_iterator i = inst_begin(F), e = inst_end(F); i != e; ++i) {
     Instruction *I = &*i;
@@ -273,7 +273,6 @@ bool BoundsChecking::runOnFunction(Function &F) {
         WorkList.push_back(I);
   }
 
-  bool MadeChange = false;
   for (std::vector<Instruction*>::iterator i = WorkList.begin(),
        e = WorkList.end(); i != e; ++i) {
     Inst = *i;
@@ -290,20 +289,28 @@ bool BoundsChecking::runOnFunction(Function &F) {
       llvm_unreachable("unknown Instruction type");
     }
   }
+}
 
+void BoundsChecking::localElimination(Function &F) {
   tr(it,F) {
     tr_lu(i,checkpoints,&*it) {
       for (typeof(i) j = checkpoints.lower_bound(&*it); j != i; j++) {
         CheckPoint a = i->second;
         CheckPoint b = j->second;
-        /* errs() << "apa\n"; */
         if(a.name == b.name) {
-          /* errs() << "bepa\n"; */
           if(a.isUpper == b.isUpper) {
-            /* errs() << "cepa\n"; */
-            if(a.bound->getValue() == b.bound->getValue()) {
-              checkpoints.erase(i);
-              /* errs() << "Tog bort\n"; */
+            bool i_is_before_j = a.getIndex() < b.getIndex();
+            typeof(i) prev = i_is_before_j ? i : j;
+            typeof(i) next = i_is_before_j ? j : i;
+            a = prev->second;
+            b = next->second;
+            if(( a.isUpper && (a.bound->getValue().sge(b.bound->getValue())))
+            || (!a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))) {
+              prev->second.bound = b.bound;
+              checkpoints.erase(next);
+              break;
+            } else {
+              checkpoints.erase(next);
               break;
             }
           }
@@ -311,32 +318,30 @@ bool BoundsChecking::runOnFunction(Function &F) {
       }
     }
   }
+}
 
+bool BoundsChecking::runOnFunction(Function &F) {
+  TD = &getAnalysis<DataLayout>();
+  TLI = &getAnalysis<TargetLibraryInfo>();
+
+  TrapBB = 0;
+  BuilderTy TheBuilder(F.getContext(), TargetFolder(TD));
+  Builder = &TheBuilder;
+  ObjectSizeOffsetEvaluator TheObjSizeEval(TD, TLI, F.getContext());
+  ObjSizeEval = &TheObjSizeEval;
+
+  // check HANDLE_MEMORY_INST in include/llvm/Instruction.def for memory
+  // touching instructions
+  addAllChecks(F);
+
+  localElimination(F);
+
+  bool MadeChange = false;
   for (typeof(checkpoints.begin()) it=checkpoints.begin(); it!=checkpoints.end(); ++it) {
     CheckPoint c = it->second;
     Builder->SetInsertPoint(c.point);
-    MadeChange |= syntesize(c);
+    MadeChange |= synthesize(c);
   }
-  /* errs() << "Size :   " << WorkList.size() << " !!" << endl; */
-  /*
-  for (std::vector<Instruction*>::iterator i = WorkList.begin(),
-       e = WorkList.end(); i != e; ++i) {
-    Inst = *i;
-
-    Builder->SetInsertPoint(Inst);
-    if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
-      MadeChange |= instrument(LI->getPointerOperand(), LI);
-    } else if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
-      MadeChange |= instrument(SI->getPointerOperand(), SI->getValueOperand());
-    } else if (AtomicCmpXchgInst *AI = dyn_cast<AtomicCmpXchgInst>(Inst)) {
-      MadeChange |= instrument(AI->getPointerOperand(),AI->getCompareOperand());
-    } else if (AtomicRMWInst *AI = dyn_cast<AtomicRMWInst>(Inst)) {
-      MadeChange |= instrument(AI->getPointerOperand(), AI->getValOperand());
-    } else {
-      llvm_unreachable("unknown Instruction type");
-    }
-  }
-  */
   return MadeChange;
 }
 
