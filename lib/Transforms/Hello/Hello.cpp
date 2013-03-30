@@ -23,6 +23,9 @@ using namespace std;
 static cl::opt<bool> SingleTrapBB("bounds-checking-single-trap-2",
                                   cl::desc("Use one trap block per function"));
 
+static cl::opt<bool> TrapDontCheckConstants("apa",
+                                  cl::desc("Kolla om constant"));
+
 STATISTIC(ChecksAdded, "Bounds checks added");
 STATISTIC(ChecksSkipped, "Bounds checks skipped");
 STATISTIC(ChecksUnable, "Bounds checks unable to add");
@@ -108,15 +111,14 @@ BasicBlock *BoundsChecking::getTrapBB() {
 void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   // check if the comparison is always false
   ConstantInt *C = dyn_cast_or_null<ConstantInt>(Cmp);
-  /* if (C) { */
-  /*   errs() << "Skipping check" << "\n"; */
-  /*   ++ChecksSkipped; */
-  /*   if (!C->getZExtValue()) */
-  /*     return; */
-  /*   else */
-  /*     Cmp = NULL; // unconditional branch */
-  /* } */
-  errs() << "Got here" << "\n";
+  if (C && !TrapDontCheckConstants) {
+    errs() << "Skipping check" << "\n";
+    ++ChecksSkipped;
+    if (!C->getZExtValue())
+      return;
+    else
+      Cmp = NULL; // unconditional branch
+  }
 
   Instruction *Inst = Builder->GetInsertPoint();
   BasicBlock *OldBB = Inst->getParent();
@@ -188,15 +190,71 @@ bool BoundsChecking::syntesize(CheckPoint c) {
   Value *Cmp;
   if(c.isUpper) {
     Cmp = Builder->CreateICmpULT(c.bound, c.name);
-    errs() << "Syntesiezing ubound\n";
+    /* errs() << "Syntesiezing ubound\n"; */
   } else {
     Cmp = Builder->CreateICmpULT(c.name, c.bound);
-    errs() << "Syntesiezing lbound\n";
+    /* errs() << "Syntesiezing lbound\n"; */
   }
   emitBranchToTrap(Cmp);
 
   ++ChecksAdded;
   return true;
+}
+
+Value* backtrace(Value *Offset,
+                 APInt &minn,
+                 APInt &maxx) {
+#define PM(Class) Class *i = dyn_cast<Class>(Offset)
+  if(PM(BinaryOperator)){
+    Value *lhs = i->getOperand(0);
+    Value *rhs = i->getOperand(1);
+
+    ConstantInt *constant;
+    Value *other;
+    if(( constant = dyn_cast<ConstantInt>(lhs) )){
+      other = rhs;
+    } else if(( constant = dyn_cast<ConstantInt>(rhs) )){
+      other = lhs;
+    } else {
+      return Offset;
+    }
+
+    const APInt & c= constant->getValue();
+    if(i->getOpcode() == Instruction::Add){
+      minn -= c;
+      maxx -= c;
+      return backtrace(other, minn, maxx);
+    }
+    else if(i->getOpcode() == Instruction::Sub){
+      if(other == lhs) {
+        minn += c;
+        maxx += c;
+        return backtrace(other, minn, maxx);
+      } else {
+        minn -= c;
+        maxx -= c;
+        swap(minn, maxx);
+        return backtrace(other, minn, maxx);
+      }
+    }
+
+    else if(i->getOpcode() == Instruction::Mul){
+      if(c.slt(0)) {
+        swap(minn, maxx);
+      }
+      minn = (minn+c-1).sdiv(c);
+      maxx = maxx.sdiv(c);
+      return backtrace(other, minn, maxx);
+    }
+  } else if(PM(SExtInst)) {
+    Value *v = i->getOperand(0);
+    IntegerType *t = dyn_cast<IntegerType>(v->getType());
+    minn = minn.sextOrTrunc(t->getBitWidth());
+    maxx = maxx.sextOrTrunc(t->getBitWidth());
+
+    return backtrace(v, minn, maxx);
+  }
+  return Offset;
 }
 
 void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
@@ -214,6 +272,7 @@ void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
 
   Value *Size   = SizeOffset.first;
   Value *Offset = SizeOffset.second;
+
   ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
   ConstantInt *OffsetCI = dyn_cast<ConstantInt>(Offset);
   if (OffsetCI && OffsetCI->getValue() == 0) {
@@ -221,15 +280,22 @@ void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
     return;
   }
 
-  Type *IntTy = TD->getIntPtrType(Ptr->getType());
+  Type *IntTy = Offset->getType();
+  APInt minn = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0))->getValue();
+  APInt maxx = SizeCI->getValue();
+  Offset = backtrace(Offset, minn, maxx);
+  IntTy = Offset->getType();
+  ConstantInt *minCI = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, minn));
+  ConstantInt *maxCI = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, maxx));
+
   //Value *NeededSizeVal = ConstantInt::get(IntTy, NeededSize);
   BasicBlock *BB = Inst->getParent();
   /* checkpoints[BB].add(new CheckPoint(Offset, Size - NeededSizeVal, True, Inst)); */
-  checkpoints.insert(make_pair(BB,CheckPoint(Offset, SizeCI, true, Inst)));
-  errs() << "Adding ubound\n";
+  checkpoints.insert(make_pair(BB,CheckPoint(Offset, maxCI, true, Inst)));
+  /* errs() << "Adding ubound\n"; */
   if (!OffsetCI || OffsetCI->getValue().slt(0)) {
-    checkpoints.insert(make_pair(BB,CheckPoint(Offset, dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0)), false, Inst)));
-    errs() << "Adding lbound\n";
+    checkpoints.insert(make_pair(BB,CheckPoint(Offset, minCI, false, Inst)));
+    /* errs() << "Adding lbound\n"; */
   }
 }
 
@@ -275,20 +341,17 @@ bool BoundsChecking::runOnFunction(Function &F) {
 
   tr(it,F) {
     tr_lu(i,checkpoints,&*it) {
-      CheckPoint a = i->second;
-      a.name->dump();
-
       for (typeof(i) j = checkpoints.lower_bound(&*it); j != i; j++) {
         CheckPoint a = i->second;
         CheckPoint b = j->second;
-        errs() << "apa\n";
+        /* errs() << "apa\n"; */
         if(a.name == b.name) {
-          errs() << "bepa\n";
+          /* errs() << "bepa\n"; */
           if(a.isUpper == b.isUpper) {
-            errs() << "cepa\n";
+            /* errs() << "cepa\n"; */
             if(a.bound->getValue() == b.bound->getValue()) {
               checkpoints.erase(i);
-              errs() << "Tog bort\n";
+              /* errs() << "Tog bort\n"; */
               break;
             }
           }
