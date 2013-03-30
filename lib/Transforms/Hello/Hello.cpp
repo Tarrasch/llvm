@@ -13,6 +13,8 @@
 #include "llvm/Transforms/Instrumentation.h"
 using namespace llvm;
 
+#define all(c) (c).begin(), (c).end()
+
 #define tr(it, c) \
   for (typeof((c).begin()) it = (c).begin(); it != (c).end(); it++)
 #define tr_lu(it, c, key) \
@@ -42,7 +44,7 @@ namespace {
     CheckPoint(Value* n, ConstantInt* b, bool i, Instruction* p) 
       : name(n), bound(b), isUpper(i), point(p) {}
 
-    int getIndex() {
+    int getIndex() const {
       BasicBlock *bb = point->getParent();
       int i = 0;
       tr(it, *bb){
@@ -50,6 +52,10 @@ namespace {
         i++;
       }
       assert(false);
+    }
+
+    bool operator<(const CheckPoint& other) const {
+      return getIndex() < other.getIndex();
     }
   };
 
@@ -67,7 +73,7 @@ namespace {
       AU.addRequired<TargetLibraryInfo>();
     }
 
-    multimap< BasicBlock*, CheckPoint > checkpoints;
+    map< BasicBlock*, vector< CheckPoint > > checkpoints;
 
   private:
     const DataLayout *TD;
@@ -256,10 +262,10 @@ void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
   //Value *NeededSizeVal = ConstantInt::get(IntTy, NeededSize);
   BasicBlock *BB = Inst->getParent();
   /* checkpoints[BB].add(new CheckPoint(Offset, Size - NeededSizeVal, True, Inst)); */
-  checkpoints.insert(make_pair(BB,CheckPoint(Offset, maxCI, true, Inst)));
+  checkpoints[BB].push_back(CheckPoint(Offset, maxCI, true, Inst));
   /* errs() << "Adding ubound\n"; */
   if (!OffsetCI || OffsetCI->getValue().slt(0)) {
-    checkpoints.insert(make_pair(BB,CheckPoint(Offset, minCI, false, Inst)));
+    checkpoints[BB].push_back(CheckPoint(Offset, minCI, false, Inst));
     /* errs() << "Adding lbound\n"; */
   }
 }
@@ -274,7 +280,7 @@ void BoundsChecking::addAllChecks(Function &F) {
   }
 
   for (std::vector<Instruction*>::iterator i = WorkList.begin(),
-       e = WorkList.end(); i != e; ++i) {
+      e = WorkList.end(); i != e; ++i) {
     Inst = *i;
 
     if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
@@ -293,24 +299,35 @@ void BoundsChecking::addAllChecks(Function &F) {
 
 void BoundsChecking::localElimination(Function &F) {
   tr(it,F) {
-    tr_lu(i,checkpoints,&*it) {
-      for (typeof(i) j = checkpoints.lower_bound(&*it); j != i; j++) {
-        CheckPoint a = i->second;
-        CheckPoint b = j->second;
+    errs() << "ytterssta\n";
+    it->dump();
+    BasicBlock *BB = &(*it);
+    sort(all(checkpoints[BB]));
+    tr(i,checkpoints[BB]) {
+      errs() << "\t";
+      i->point->dump();
+      assert(&(*it) == i->point->getParent());
+      for (typeof(i) j = checkpoints[BB].begin(); j != i; j++) {
+        errs() << "\t\t";
+        j->point->dump();
+        assert(&(*it) == j->point->getParent());
+        CheckPoint a = *i;
+        CheckPoint b = *j;
         if(a.name == b.name) {
           if(a.isUpper == b.isUpper) {
+            errs () << "About to remove \n";
             bool i_is_before_j = a.getIndex() < b.getIndex();
             typeof(i) prev = i_is_before_j ? i : j;
             typeof(i) next = i_is_before_j ? j : i;
-            a = prev->second;
-            b = next->second;
+            a = *prev;
+            b = *next;
             if(( a.isUpper && (a.bound->getValue().sge(b.bound->getValue())))
             || (!a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))) {
-              prev->second.bound = b.bound;
-              checkpoints.erase(next);
+              prev->bound = b.bound;
+              checkpoints[BB].erase(next);
               break;
             } else {
-              checkpoints.erase(next);
+              checkpoints[BB].erase(next);
               break;
             }
           }
@@ -337,10 +354,12 @@ bool BoundsChecking::runOnFunction(Function &F) {
   localElimination(F);
 
   bool MadeChange = false;
-  for (typeof(checkpoints.begin()) it=checkpoints.begin(); it!=checkpoints.end(); ++it) {
-    CheckPoint c = it->second;
-    Builder->SetInsertPoint(c.point);
-    MadeChange |= synthesize(c);
+  tr(it, checkpoints) {
+    tr(it2, it->second) {
+      CheckPoint c = *it2;
+      Builder->SetInsertPoint(c.point);
+      MadeChange |= synthesize(c);
+    }
   }
   return MadeChange;
 }
