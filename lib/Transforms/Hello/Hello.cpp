@@ -311,25 +311,18 @@ void BoundsChecking::localElimination(Function &F) {
         errs() << "\t\t";
         j->point->dump();
         assert(&(*it) == j->point->getParent());
-        CheckPoint a = *i;
-        CheckPoint b = *j;
+        CheckPoint a = *j;
+        CheckPoint b = *i;
         if(a.name == b.name) {
           if(a.isUpper == b.isUpper) {
             errs () << "About to remove \n";
-            bool i_is_before_j = a.getIndex() < b.getIndex();
-            typeof(i) prev = i_is_before_j ? i : j;
-            typeof(i) next = i_is_before_j ? j : i;
-            a = *prev;
-            b = *next;
             if(( a.isUpper && (a.bound->getValue().sge(b.bound->getValue())))
             || (!a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))) {
-              prev->bound = b.bound;
-              checkpoints[BB].erase(next);
-              break;
-            } else {
-              checkpoints[BB].erase(next);
-              break;
+              j->bound = b.bound;
             }
+            checkpoints[BB].erase(i);
+            i--;
+            break;
           }
         }
       }
