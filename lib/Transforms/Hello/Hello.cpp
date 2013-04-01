@@ -3,6 +3,7 @@
 #include "llvm/Pass.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Support/CFG.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/InstIterator.h"
@@ -18,7 +19,7 @@ using namespace llvm;
 #define tr(it, c) \
   for (typeof((c).begin()) it = (c).begin(); it != (c).end(); it++)
 #define tr_pred(it, c) \
-  for (typeof((c).pred_begin()) it = (c).pred_begin(); it != (c).pred_end(); it++)
+  for (typeof(pred_begin(c)) it = pred_begin(c); it != pred_end(c);it++)
 #define tr_lu(it, c, key) \
   for (typeof((c).lower_bound(key)) it = (c).lower_bound(key); it != (c).upper_bound(key); it++)
 #include <map>
@@ -44,15 +45,25 @@ typedef IRBuilder<true, TargetFolder> BuilderTy;
 
 /* bool compare */
 
+#define CheckType pair < Value*, bool >
+#define CheckSet map< CheckType, CheckPoint >
+
 namespace {
   struct CheckPoint {
+    public:
     Value* name;
     ConstantInt* bound;
     bool isUpper;
     Instruction *point;
 
-    CheckPoint(Value* n, ConstantInt* b, bool i, Instruction* p) 
+    CheckPoint(Value* n, ConstantInt* b, bool i, Instruction* p)
       : name(n), bound(b), isUpper(i), point(p) {}
+
+    CheckPoint(const CheckPoint &c)
+      : name(c.name), bound(c.bound), isUpper(c.isUpper), point(c.point) {}
+
+    CheckPoint()
+      : name(NULL), bound(NULL), isUpper(false), point(NULL) { errs() << "WARNING\n"; }
 
     int getIndex() const {
       BasicBlock *bb = point->getParent();
@@ -64,10 +75,19 @@ namespace {
       assert(false);
     }
 
-    bool operator<(const CheckPoint& other) const {
-      return getIndex() < other.getIndex();
+    CheckType getCT(){ return CheckType(name, isUpper); }
+
+    bool operator==(const CheckPoint& other) const {
+      return name == other.name
+          && bound == other.bound
+          && isUpper == other.isUpper;
+    }
+
+    static bool positionComparator(const CheckPoint &one, const CheckPoint& other) {
+      return one.getIndex() < other.getIndex();
     }
   };
+
 
   struct BoundsChecking : public FunctionPass {
     static char ID;
@@ -84,6 +104,15 @@ namespace {
     }
 
     map< BasicBlock*, vector< CheckPoint > > checkpoints;
+
+    CheckSet c_gen(BasicBlock *BB) {
+      vector < CheckPoint > cps = checkpoints[BB];
+      CheckSet cs;
+      tr(it, cps) {
+        cs[it->getCT()] = *it;
+      }
+      return cs;
+    }
 
   private:
     const DataLayout *TD;
@@ -310,12 +339,58 @@ void BoundsChecking::addAllChecks(Function &F) {
   }
 }
 
+bool same_types(const CheckPoint &c1, const CheckPoint &c2) {
+  if(c1.name != c2.name) return false;
+  if(c1.isUpper != c2.isUpper) return false;
+  return true;
+}
+
+// Example: arg1@(i < 100) subsumes arg2@(i < 200)
+// also:    arg1@(i < 100) subsumes arg2@(i < 100)
+//
+// subsumes((i < 100), (i < 200)) ==> true
+bool subsumes(const CheckPoint &a, const CheckPoint &b) {
+  if(!same_types(a, b)) return false;
+  return ( a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))
+      || (!a.isUpper && (a.bound->getValue().sge(b.bound->getValue())));
+}
+
+CheckSet cp_union(CheckSet a, const CheckSet &b) {
+  tr(it, b){
+    CheckType ct = it->first;
+    if(a.count(ct)) {
+      if(subsumes(it->second, a[ct])){
+        a[ct] = it->second;
+      }
+    }
+    else {
+      a[ct] = it->second;
+    }
+  }
+  return a;
+}
+
+CheckSet cp_intersect(CheckSet a, const CheckSet &b) {
+  tr(it, b){
+    CheckType ct = it->first;
+    if(a.count(ct)) {
+      if(subsumes(a[ct], it->second)){
+        a[ct] = it->second;
+      }
+    }
+    else {
+      a.erase(ct);
+    }
+  }
+  return a;
+}
+
 void BoundsChecking::localElimination(Function &F) {
   tr(it,F) {
     errs() << "ytterssta\n";
     it->dump();
     BasicBlock *BB = &(*it);
-    sort(all(checkpoints[BB]));
+    sort(all(checkpoints[BB]), &CheckPoint::positionComparator);
     tr(i,checkpoints[BB]) {
       errs() << "\t";
       i->point->dump();
@@ -324,19 +399,16 @@ void BoundsChecking::localElimination(Function &F) {
         errs() << "\t\t";
         j->point->dump();
         assert(&(*it) == j->point->getParent());
-        CheckPoint a = *j;
-        CheckPoint b = *i;
-        if(a.name == b.name) {
-          if(a.isUpper == b.isUpper) {
-            errs () << "About to remove \n";
-            if(( a.isUpper && (a.bound->getValue().sge(b.bound->getValue())))
-            || (!a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))) {
-              j->bound = b.bound;
-            }
-            checkpoints[BB].erase(i);
-            i--;
-            break;
+        CheckPoint &a = *j;
+        CheckPoint &b = *i;
+        if(same_types(a, b)) {
+          errs () << "About to remove \n";
+          if(subsumes(b, a)) {
+            a.bound = b.bound;
           }
+          checkpoints[BB].erase(i);
+          i--;
+          break;
         }
       }
     }
@@ -347,36 +419,37 @@ vector < CheckPoint > forward(vector < CheckPoint > arg) {
   return arg;
 }
 
-void redundancyElimination(Function &F) {
-  map< BasicBlock*, vector< CheckPoint > > c_out;
+void BoundsChecking::redundancyElimination(Function &F) {
+  map< BasicBlock*, CheckSet > c_out;
   bool change = true;
   while(change) {
     change = false;
     tr(it, F) {
       BasicBlock *BB = &(*it);
-      vector< CheckPoint > c_in;
+      CheckSet c_in;
       bool first = true;
-      tr_pred(prit, *BB) {
+      tr_pred(prit, BB) {
         if(first) { first=false; c_in = c_out[*prit]; }
         else c_in = cp_intersect(c_in, c_out[*prit]);
       }
-      vector< CheckPoint > new_c_out = cp_union(checkpoints[BB], forward(c_in));
+      CheckSet new_c_out = cp_union(c_gen(BB), c_in);
       change |= c_out[BB].size() != cp_intersect(c_out[BB], new_c_out).size();
       c_out[BB] = new_c_out;
     }
   }
   tr(it, F) {
     BasicBlock *BB = &(*it);
-    vector< CheckPoint > c_in;
+    vector < CheckPoint > &cps = checkpoints[BB];
+    CheckSet c_in;
     bool first = true;
-    tr_pred(prit, *BB) {
+    tr_pred(prit, BB) {
       if(first) { first=false; c_in = c_out[*prit]; }
       else c_in = cp_intersect(c_in, c_out[*prit]);
     }
-    tr(c, checkpoints[BB]) {
+    tr(c, cps) {
       tr(c_prime, c_in) {
-        if(is_subsumed(*c, *c_prime)){
-          checkpoints[BB].erase(c);
+        if(subsumes(*c, c_prime->second)){
+          cps.erase(c);
           c--;
           break;
         }
