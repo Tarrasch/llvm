@@ -14,12 +14,15 @@
 #include "llvm/Transforms/Instrumentation.h"
 using namespace llvm;
 
+#define cout errs()
 #define all(c) (c).begin(), (c).end()
 
 #define tr(it, c) \
   for (typeof((c).begin()) it = (c).begin(); it != (c).end(); it++)
 #define tr_pred(it, c) \
   for (typeof(pred_begin(c)) it = pred_begin(c); it != pred_end(c);it++)
+#define tr_succ(it, c) \
+  for (typeof(succ_begin(c)) it = succ_begin(c); it != succ_end(c);it++)
 #define tr_lu(it, c, key) \
   for (typeof((c).lower_bound(key)) it = (c).lower_bound(key); it != (c).upper_bound(key); it++)
 #include <map>
@@ -64,6 +67,11 @@ namespace {
 
     CheckPoint()
       : name(NULL), bound(NULL), isUpper(false), point(NULL) { errs() << "WARNING\n"; }
+
+    void dump() {
+      cout << bound->getValue() << (isUpper ? "(<)" : "(>)") << " ";
+      name->dump();
+    }
 
     int getIndex() const {
       BasicBlock *bb = point->getParent();
@@ -133,7 +141,10 @@ namespace {
 
     // Passes
     void localElimination(Function &F);
-    void redundancyElimination(Function &F);
+    void globalElimination(Function &F);
+      void redundancyCreation(Function &F);
+      void redundancyElimination(Function &F);
+      void loopRemovals(Function &F);
  };
 }
 
@@ -162,6 +173,18 @@ BasicBlock *BoundsChecking::getTrapBB() {
 
   Builder->SetInsertPoint(PrevInsertPoint);
   return TrapBB;
+}
+
+/* void dump(CheckType ct) { */
+/*   ct.first.dump(); */
+/*   cout << "(" + ct.second */
+/* } */
+
+void cs_dump(CheckSet cs) {
+  tr(it, cs) {
+    it->second.dump();
+  }
+  cout << "\n";
 }
 
 
@@ -387,22 +410,22 @@ CheckSet cp_intersect(CheckSet a, const CheckSet &b) {
 
 void BoundsChecking::localElimination(Function &F) {
   tr(it,F) {
-    errs() << "ytterssta\n";
-    it->dump();
+    /* errs() << "ytterssta\n"; */
+    /* it->dump(); */
     BasicBlock *BB = &(*it);
     sort(all(checkpoints[BB]), &CheckPoint::positionComparator);
     tr(i,checkpoints[BB]) {
-      errs() << "\t";
-      i->point->dump();
+      /* errs() << "\t"; */
+      /* i->point->dump(); */
       assert(&(*it) == i->point->getParent());
       for (typeof(i) j = checkpoints[BB].begin(); j != i; j++) {
-        errs() << "\t\t";
-        j->point->dump();
+        /* errs() << "\t\t"; */
+        /* j->point->dump(); */
         assert(&(*it) == j->point->getParent());
         CheckPoint &a = *j;
         CheckPoint &b = *i;
         if(same_types(a, b)) {
-          errs () << "About to remove \n";
+          /* errs () << "About to remove \n"; */
           if(subsumes(b, a)) {
             a.bound = b.bound;
           }
@@ -419,10 +442,60 @@ vector < CheckPoint > forward(vector < CheckPoint > arg) {
   return arg;
 }
 
+void BoundsChecking::globalElimination(Function &F) {
+  redundancyCreation(F);
+  redundancyElimination(F);
+  loopRemovals(F);
+}
+
+void BoundsChecking::redundancyCreation(Function &F) {
+  map< BasicBlock*, CheckSet > c_out;
+  bool change = true;
+  while(change) {
+    cout << "ScoobyDoo\n";
+    change = false;
+    tr(it, F) {
+      BasicBlock *BB = &(*it);
+      CheckSet c_in;
+      bool first = true;
+      tr_succ(prit, BB) {
+        if(first) { first=false; c_in = c_out[*prit]; }
+        else c_in = cp_intersect(c_in, c_out[*prit]);
+      }
+      CheckSet new_c_out = cp_union(c_gen(BB), c_in);
+      change |= c_out[BB] != new_c_out;
+      c_out[BB] = new_c_out;
+    }
+  }
+
+  tr(it, F) {
+    BasicBlock *BB = &(*it);
+    cs_dump(c_out[BB]);
+    vector < CheckPoint > &cps = checkpoints[BB];
+    CheckSet c_in;
+    bool first = true;
+    tr_succ(prit, BB) {
+      if(first) { first=false; c_in = c_out[*prit]; }
+      else c_in = cp_intersect(c_in, c_out[*prit]);
+    }
+    tr(c, cps) {
+      tr(c_prime, c_in) {
+        if(subsumes(c_prime->second, *c)){
+          cout << "Removed in redundancyElimination\n";
+          c->bound = c_prime->second.bound;
+          break;
+        }
+      }
+    }
+  }
+}
+
+
 void BoundsChecking::redundancyElimination(Function &F) {
   map< BasicBlock*, CheckSet > c_out;
   bool change = true;
   while(change) {
+    cout << "ScoobyDoo\n";
     change = false;
     tr(it, F) {
       BasicBlock *BB = &(*it);
@@ -433,12 +506,14 @@ void BoundsChecking::redundancyElimination(Function &F) {
         else c_in = cp_intersect(c_in, c_out[*prit]);
       }
       CheckSet new_c_out = cp_union(c_gen(BB), c_in);
-      change |= c_out[BB].size() != cp_intersect(c_out[BB], new_c_out).size();
+      change |= c_out[BB] != new_c_out;
       c_out[BB] = new_c_out;
     }
   }
+
   tr(it, F) {
     BasicBlock *BB = &(*it);
+    cs_dump(c_out[BB]);
     vector < CheckPoint > &cps = checkpoints[BB];
     CheckSet c_in;
     bool first = true;
@@ -448,7 +523,8 @@ void BoundsChecking::redundancyElimination(Function &F) {
     }
     tr(c, cps) {
       tr(c_prime, c_in) {
-        if(subsumes(*c, c_prime->second)){
+        if(subsumes(c_prime->second, *c)){
+          cout << "Removed in redundancyElimination\n";
           cps.erase(c);
           c--;
           break;
@@ -456,6 +532,9 @@ void BoundsChecking::redundancyElimination(Function &F) {
       }
     }
   }
+}
+
+void BoundsChecking::loopRemovals(Function &F) {
 }
 
 bool BoundsChecking::runOnFunction(Function &F) {
@@ -473,7 +552,7 @@ bool BoundsChecking::runOnFunction(Function &F) {
   addAllChecks(F);
 
   localElimination(F);
-  redundancyElimination(F);
+  globalElimination(F);
 
   bool MadeChange = false;
   tr(it, checkpoints) {
