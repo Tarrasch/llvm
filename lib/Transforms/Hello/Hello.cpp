@@ -69,7 +69,7 @@ namespace {
       : name(c.name), bound(c.bound), isUpper(c.isUpper), point(c.point) {}
 
     CheckPoint()
-      : name(NULL), bound(NULL), isUpper(false), point(NULL) { errs() << "WARNING\n"; }
+      : name(NULL), bound(NULL), isUpper(false), point(NULL) {}
 
     void dump() {
       cout << bound->getValue() << (isUpper ? "(<)" : "(>)") << " ";
@@ -187,6 +187,7 @@ BasicBlock *BoundsChecking::getTrapBB() {
 /* } */
 
 void cs_dump(CheckSet cs) {
+  cout << "cs_dump:\n";
   tr(it, cs) {
     it->second.dump();
   }
@@ -399,19 +400,19 @@ CheckSet cp_union(CheckSet a, const CheckSet &b) {
   return a;
 }
 
-CheckSet cp_intersect(CheckSet a, const CheckSet &b) {
-  tr(it, b){
+CheckSet cp_intersect(CheckSet &a, CheckSet &b) {
+  CheckSet r;
+  tr(it, a){
     CheckType ct = it->first;
-    if(a.count(ct)) {
-      if(subsumes(a[ct], it->second)){
-        a[ct] = it->second;
+    if(b.count(ct)) {
+      if(subsumes(b[ct], it->second)){
+        r[ct] = b[ct];
+      } else {
+        r[ct] = a[ct];
       }
     }
-    else {
-      a.erase(ct);
-    }
   }
-  return a;
+  return r;
 }
 
 void BoundsChecking::localElimination(Function &F) {
@@ -458,7 +459,6 @@ void BoundsChecking::redundancyCreation(Function &F) {
   map< BasicBlock*, CheckSet > c_out;
   bool change = true;
   while(change) {
-    cout << "ScoobyDoo\n";
     change = false;
     tr(it, F) {
       BasicBlock *BB = &(*it);
@@ -476,7 +476,6 @@ void BoundsChecking::redundancyCreation(Function &F) {
 
   tr(it, F) {
     BasicBlock *BB = &(*it);
-    cs_dump(c_out[BB]);
     vector < CheckPoint > &cps = checkpoints[BB];
     CheckSet c_in;
     bool first = true;
@@ -501,7 +500,6 @@ void BoundsChecking::redundancyElimination(Function &F) {
   map< BasicBlock*, CheckSet > c_out;
   bool change = true;
   while(change) {
-    cout << "ScoobyDoo\n";
     change = false;
     tr(it, F) {
       BasicBlock *BB = &(*it);
@@ -519,16 +517,21 @@ void BoundsChecking::redundancyElimination(Function &F) {
 
   tr(it, F) {
     BasicBlock *BB = &(*it);
-    /* cs_dump(c_out[BB]); */
     vector < CheckPoint > &cps = checkpoints[BB];
     CheckSet c_in;
     bool first = true;
+    /* BB->dump(); */
     tr_pred(prit, BB) {
       if(first) { first=false; c_in = c_out[*prit]; }
       else c_in = cp_intersect(c_in, c_out[*prit]);
+      /* cs_dump(c_out[*prit]); */
     }
+    /* cs_dump(c_in); */
     tr(c, cps) {
       tr(c_prime, c_in) {
+        cout << "\n\n";
+        /* c_prime->second.dump(); */
+        /* c->dump(); */
         if(subsumes(c_prime->second, *c)){
           cout << "Removed in redundancyElimination\n";
           cps.erase(c);
@@ -540,23 +543,72 @@ void BoundsChecking::redundancyElimination(Function &F) {
   }
 }
 
-bool isInvariant(Value*a) {
-  return false;
+Value* isDec(Value*a, Value*o, Loop* l) {
+  return NULL;
 }
 
-bool isDec(Value*a) {
-  return false;
+Value* isInc(Value*a, Value*o, Loop* l) {
+#define PMa(Class) Class *i = dyn_cast<Class>(a)
+  if(PMa(BinaryOperator)){
+    Value *lhs = i->getOperand(0);
+    Value *rhs = i->getOperand(1);
+
+    ConstantInt *constant;
+    Value *other;
+    if(( constant = dyn_cast<ConstantInt>(lhs) )){
+      other = rhs;
+    } else if(( constant = dyn_cast<ConstantInt>(rhs) )){
+      other = lhs;
+    } else {
+      return NULL;
+    }
+
+    const APInt & c= constant->getValue();
+    if(i->getOpcode() == Instruction::Add){
+      cout << "Testtest\n";
+      c.dump();
+      cout << c.sge(0);
+      if(c.sge(0))
+        return isInc(other, o, l);
+    } else if(i->getOpcode() == Instruction::Sub){
+      return NULL;
+      if(other == lhs) {
+        return isInc(other, o, l);
+      } else {
+        return isInc(other, o, l);
+      }
+    }
+  }
+  if(PMa(PHINode)){
+    Value* r=NULL;
+    for(unsigned j=0; j<i->getNumIncomingValues(); ++j){
+      Value *b = i->getIncomingValue(j);
+      if(l->isLoopInvariant(b)) {
+        r = b;
+        continue;
+      }
+      if(a==o)
+        continue;
+      if(isInc(b,o,l))
+        continue;
+      return NULL;
+    }
+    return r;
+  }
+
+  return NULL;
 }
 
-bool isInc(Value*a) {
-  return false;
-}
 
-
-bool canHoist(const CheckPoint &a, Loop* l) {
-  return l->isLoopInvariant(a.name)
-     || ( a.isUpper && isDec(a.name))
-     || (!a.isUpper && isInc(a.name));
+Value* canHoist(const CheckPoint &a, Loop* l) {
+  if(l->isLoopInvariant(a.name)) {
+    return a.name;
+  }
+  if(a.isUpper) {
+    return isDec(a.name, a.name, l);
+  } else {
+    return isInc(a.name, a.name, l);
+  }
 }
 
 bool dominatesExits(BasicBlock* BB, DominatorTree &dt, Loop* l) {
@@ -569,15 +621,27 @@ bool dominatesExits(BasicBlock* BB, DominatorTree &dt, Loop* l) {
   return true;
 }
 
+bool isExit(BasicBlock* BB, Loop* l) {
+  SmallVector<BasicBlock *, 4> ExitBlocks;
+  l->getExitBlocks(ExitBlocks);
+  tr(exit, ExitBlocks) {
+    if(*exit == BB)
+      return true;
+  }
+  return false;
+}
+
 bool isDominatorBlock(BasicBlock* BB, DominatorTree &dt, Loop* l) {
   bool run=false;
   tr_succ(s, BB) {
+    if(isExit(*s, l))
+      continue;
     if(s->getUniquePredecessor()) {
-      if(dominatesExits(*s,dt,l)) {
+      if(!dominatesExits(*s,dt,l)) {
         run = true;
       }
     } else {
-      return false; //??
+      return false;
     }
   }
   return run;
@@ -587,19 +651,24 @@ void vec_union(vector < CheckPoint > & cps, const CheckSet &s) {
   tr(c_prime, s) {
     bool subsumed = false;
     tr(c, cps) {
-      if(subsumes(c_prime->second, *c)){
-        c->bound = c_prime->second.bound;
+      if(same_types(c_prime->second, *c)){
+        if(subsumes(c_prime->second, *c)){
+          c->bound = c_prime->second.bound;
+        }
         subsumed = true;
         break;
       }
     }
     if(!subsumed) {
-      cps.push_back(c_prime->second);
+      CheckPoint copy(c_prime->second);
+      copy.point = NULL;
+      cps.push_back(copy);
     }
   }
 }
 
 void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
+  cout << "Entered loopHoist\n";
   const vector < Loop* > & subs = loop->getSubLoops();
   tr(sub, subs) {
     if((*sub)->getLoopDepth() == loop->getLoopDepth() + 1) {
@@ -607,15 +676,13 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     }
   }
 
-  /*
   map< BasicBlock*, CheckSet > C;
-  tr(bit, loop) {
-    BasicBlock *BB = &(*bit);
+  tr_block(bit, *loop) {
+    BasicBlock *BB = *bit;
     vector < CheckPoint > &cps = checkpoints[BB];
     
-    CheckSet C;
     tr(it, cps) {
-      if(canHoist(*it)) {
+      if(canHoist(*it, loop)) {
         C[BB][it->getCT()] = *it;
       }
     }
@@ -624,27 +691,31 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
   while(change) {
     cout << "ScoobyDoo\n";
     change = false;
-    tr(it, loop) {
-      BasicBlock *BB = &(*it);
+    tr_block(it, *loop) {
+      BasicBlock *BB = *it;
       vector < CheckPoint > &cps = checkpoints[BB];
-      if(isDominatorBlock(*BB)) {
+      if(isDominatorBlock(BB, dt, loop)) {
         CheckSet prop;
         bool first = true;
         tr_succ(prit, BB) {
+          if(isExit(*prit, loop))
+            continue;
           if(first) { first=false; prop = C[*prit]; }
           else prop = cp_intersect(prop, C[*prit]);
         }
-        if(prop.count()) {
+        if(!prop.empty()) {
           change = true;
 
-
           vec_union(cps, prop);
-          tr(c_prime, prop) {
-            tr_succ(prit, BB) {
-              vector < CheckPoint > &S = checkpoints[*prit];
+          tr_succ(prit, BB) {
+            if(isExit(*prit, loop))
+              continue;
+            vector < CheckPoint > &S = checkpoints[*prit];
 
-              tr(i, S) {
-                if(*c_prime == *i) {
+            tr(i, S) {
+              tr(c_prime, prop) {
+                if(c_prime->second == *i) {
+                  C[*prit].erase(i->getCT());
                   S.erase(i);
                   i--;
                 }
@@ -655,7 +726,6 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
       }
     }
   }
-  */
 
   //Step 3
   tr_block(it, *loop) {
@@ -664,8 +734,8 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     if(dominatesExits(BB, dt, loop)) {
       CheckSet C;
       tr(it, cps) {
-        if(canHoist(*it, loop)) {
-          C[it->getCT()] = *it;
+        if(Value *b = canHoist(*it, loop)) {
+          C[it->getCT()] = CheckPoint(b, it->bound, it->isUpper, NULL);
           cps.erase(it);
           it--;
         }
@@ -677,11 +747,13 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
 }
 
 void BoundsChecking::loopRemovals(Function &F) {
-  LoopInfo &li = getAnalysis<LoopInfo>(F);
-  DominatorTree &dt = getAnalysis<DominatorTree>(F);
+  LoopInfo &li = getAnalysis<LoopInfo>();
+  DominatorTree &dt = getAnalysis<DominatorTree>();
   
   tr(loop, li) {
-    if((*loop)->getLoopDepth() == 0) {
+    /* cout << "tr(loop)\n"; */
+    /* cout << (*loop)->getLoopDepth() << "\n"; */
+    if((*loop)->getLoopDepth() == 1) {
       loopHoist(*loop, dt);
 
     }
@@ -709,6 +781,13 @@ bool BoundsChecking::runOnFunction(Function &F) {
   tr(it, checkpoints) {
     tr(it2, it->second) {
       CheckPoint c = *it2;
+      /* it->first->dump(); */
+      /* c.point->getParent()->dump(); */
+      /* assert(it->first == c.point->getParent()); */
+      if(c.point == NULL) {
+        c.point = it->first->getFirstNonPHI();
+      }
+      assert(c.point);
       Builder->SetInsertPoint(c.point);
       MadeChange |= synthesize(c);
     }
