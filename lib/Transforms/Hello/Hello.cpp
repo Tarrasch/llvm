@@ -13,6 +13,8 @@
 #include "llvm/DataLayout.h"
 #include "llvm/Target/TargetLibraryInfo.h"
 #include "llvm/Transforms/Instrumentation.h"
+#include "llvm/Transforms/Utils/SimplifyIndVar.h"
+#include "llvm/Transforms/Utils/SimplifyIndVar.h"
 using namespace llvm;
 
 #define cout errs()
@@ -71,8 +73,12 @@ namespace {
     CheckPoint()
       : name(NULL), bound(NULL), isUpper(false), point(NULL) {}
 
-    void dump() {
-      cout << bound->getValue() << (isUpper ? "(<)" : "(>)") << " ";
+    void dump() const {
+      if(isUpper)
+        cout << "i <= " << bound->getValue() << "\n";
+      else
+        cout << bound->getValue() << " <= i\n";
+      cout << bound->getValue() << (isUpper ? " > " : " < ") << " ";
       name->dump();
     }
 
@@ -203,10 +209,11 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   if (C && !TrapDontCheckConstants) {
     errs() << "Skipping check" << "\n";
     ++ChecksSkipped;
-    if (!C->getZExtValue())
+    if (!C->getZExtValue()) {
       return;
-    else
+    } else {
       Cmp = NULL; // unconditional branch
+    }
   }
 
   Instruction *Inst = Builder->GetInsertPoint();
@@ -232,10 +239,10 @@ bool BoundsChecking::synthesize(CheckPoint c) {
   Value *Cmp;
   if(c.isUpper) {
     // TODO: check edge cases
-    Cmp = Builder->CreateICmpULT(c.bound, c.name);
+    Cmp = Builder->CreateICmpSLT(c.bound, c.name);
     /* errs() << "Syntesiezing ubound\n"; */
   } else {
-    Cmp = Builder->CreateICmpULT(c.name, c.bound);
+    Cmp = Builder->CreateICmpSLT(c.name, c.bound);
     /* errs() << "Syntesiezing lbound\n"; */
   }
   emitBranchToTrap(Cmp);
@@ -543,71 +550,119 @@ void BoundsChecking::redundancyElimination(Function &F) {
   }
 }
 
-Value* isDec(Value*a, Value*o, Loop* l) {
-  return NULL;
+set < Value*> incVisited;
+Value *incRes;
+
+bool isIncDec(Value* curr_val, Loop* l, bool is_inc);
+
+Value* isDec(Value* curr_val, Loop* l) {
+  incVisited.clear();
+  incRes = NULL;
+  if(!isIncDec(curr_val, l, false)) incRes = NULL;
+  return incRes;
 }
 
-Value* isInc(Value*a, Value*o, Loop* l) {
-#define PMa(Class) Class *i = dyn_cast<Class>(a)
+Value* isInc(Value* curr_val, Loop* l) {
+  incVisited.clear();
+  incRes = NULL;
+  if(!isIncDec(curr_val, l, true)) incRes = NULL;
+  return incRes;
+}
+
+bool isIncDec(Value* curr_val, Loop* l, bool is_inc) {
+  if(incVisited.count((curr_val))) return true;
+  incVisited.insert(curr_val);
+#define PMa(Class) Class *i = dyn_cast<Class>( curr_val)
+#define recurse(val) isIncDec(val, l, is_inc)
   if(PMa(BinaryOperator)){
+    cout << "Binop \n";
     Value *lhs = i->getOperand(0);
     Value *rhs = i->getOperand(1);
 
     ConstantInt *constant;
-    Value *other;
+    Value *var;
     if(( constant = dyn_cast<ConstantInt>(lhs) )){
-      other = rhs;
+      var = rhs;
     } else if(( constant = dyn_cast<ConstantInt>(rhs) )){
-      other = lhs;
+      var = lhs;
     } else {
-      return NULL;
+      return false;
     }
 
     const APInt & c= constant->getValue();
     if(i->getOpcode() == Instruction::Add){
-      cout << "Testtest\n";
-      c.dump();
-      cout << c.sge(0);
-      if(c.sge(0))
-        return isInc(other, o, l);
+      if(is_inc ? c.sge(0) : c.sle(0))
+        return recurse(var);
     } else if(i->getOpcode() == Instruction::Sub){
-      return NULL;
-      if(other == lhs) {
-        return isInc(other, o, l);
+      if(var == lhs) {
+        if(!is_inc ? c.sge(0) : c.sle(0))
+          return recurse(var);
       } else {
-        return isInc(other, o, l);
+        return false;
       }
+    } else if(i->getOpcode() == Instruction::Mul){
+      if(is_inc && c.sge(1))
+        return recurse(var);
+    } else if(i->getOpcode() == Instruction::SDiv || i->getOpcode() == Instruction::UDiv){
+      if(!is_inc && c.sge(1))
+        return recurse(var);
     }
   }
   if(PMa(PHINode)){
-    Value* r=NULL;
-    for(unsigned j=0; j<i->getNumIncomingValues(); ++j){
-      Value *b = i->getIncomingValue(j);
-      if(l->isLoopInvariant(b)) {
-        r = b;
-        continue;
+    cout << "PHINode \n";
+    for(unsigned j=0; j < i->getNumIncomingValues(); ++j){
+      Value *new_val = i->getIncomingValue(j);
+      if(l->isLoopInvariant(new_val)) {
+        assert(incRes == NULL);
+        incRes = new_val;
       }
-      if(a==o)
-        continue;
-      if(isInc(b,o,l))
-        continue;
-      return NULL;
+      else if(!recurse(new_val)) {
+        return false;
+      }
     }
-    return r;
+    return true;
   }
 
-  return NULL;
+  return false;
 }
 
+/// Return the compare guarding the loop latch, or NULL for unrecognized tests.
+static ICmpInst *getLoopTest(Loop *L) {
+  assert(L->getExitingBlock() && "expected loop exit");
 
-Value* canHoist(const CheckPoint &a, Loop* l) {
+  BasicBlock *LatchBlock = L->getLoopLatch();
+  // Don't bother with LFTR if the loop is not properly simplified.
+  if (!LatchBlock)
+    return 0;
+
+  BranchInst *BI = dyn_cast<BranchInst>(L->getExitingBlock()->getTerminator());
+  assert(BI && "expected exit branch");
+
+  return dyn_cast<ICmpInst>(BI->getCondition());
+}
+
+Value* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
+  if(canon && a.name == canon) {
+    if(a.isUpper) {
+      if(ICmpInst* test = getLoopTest(l)) {
+        if(test->getOperand(0) == a.name)
+          return test->getOperand(1);
+        else if(test->getOperand(1) == a.name)
+          return test->getOperand(0);
+      }
+    }
+    else {
+      Type *IntTy = a.name->getType();
+      return dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0));
+    }
+  }
   if(l->isLoopInvariant(a.name)) {
     return a.name;
   }
   if(a.isUpper) {
-    return isDec(a.name, a.name, l);
+    return isDec(a.name, l);
   } else {
-    return isInc(a.name, a.name, l);
+    return isInc(a.name, l);
   }
 }
 
@@ -676,20 +731,21 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     }
   }
 
+  PHINode* canon = loop->getCanonicalInductionVariable();
   map< BasicBlock*, CheckSet > C;
   tr_block(bit, *loop) {
     BasicBlock *BB = *bit;
     vector < CheckPoint > &cps = checkpoints[BB];
     
     tr(it, cps) {
-      if(canHoist(*it, loop)) {
+      if(canHoist(*it, loop, canon)) {
         C[BB][it->getCT()] = *it;
       }
     }
   }
   bool change = true;
   while(change) {
-    cout << "ScoobyDoo\n";
+    /* cout << "ScoobyDoo\n"; */
     change = false;
     tr_block(it, *loop) {
       BasicBlock *BB = *it;
@@ -734,7 +790,7 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     if(dominatesExits(BB, dt, loop)) {
       CheckSet C;
       tr(it, cps) {
-        if(Value *b = canHoist(*it, loop)) {
+        if(Value *b = canHoist(*it, loop, canon)) {
           C[it->getCT()] = CheckPoint(b, it->bound, it->isUpper, NULL);
           cps.erase(it);
           it--;
