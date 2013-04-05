@@ -149,7 +149,7 @@ namespace {
     void emitBranchToTrap(Value *Cmp = 0);
     bool computeAllocSize(Value *Ptr, APInt &Offset, Value* &OffsetValue,
                           APInt &Size, Value* &SizeValue);
-    void addChecks(Value *Ptr, Value* InstVal, Instruction *Inst);
+    void addChecks(Value *Ptr, Instruction *Inst);
     void addAllChecks(Function &F);
     bool synthesize(CheckPoint c);
 
@@ -310,21 +310,50 @@ Value* backtrace(Value *Offset,
   return Offset;
 }
 
-void BoundsChecking::addChecks(Value *Ptr, Value* InstVal, Instruction *Inst) {
+void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
   //uint64_t NeededSize = TD->getTypeStoreSize(InstVal->getType());
   //errs() << "Instrument " << *Ptr << " for " << Twine(NeededSize)
   //            << " bytes\n";
 
-  SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
+  Value *Size  ;
+  Value *Offset;
 
-  if (!ObjSizeEval->bothKnown(SizeOffset)) {
-    errs() << "No, both are known .." << "\n";
-    ++ChecksUnable;
-    return;
+
+  if (GEPOperator *GEP = dyn_cast<GEPOperator>(Ptr)) {
+    int n = GEP->getNumOperands();
+    Offset = GEP->getOperand(n-1);
+    Type *IntTy = Offset->getType();
+    Type *type = GEP->getPointerOperandType();
+    type->dump();
+    cout << "\n";
+#undef PM
+#define PM(class, in, out) class *out = dyn_cast<class>(in)
+    if(PM(PointerType, type, pt)){
+      cout << " 1 Yayyy\n";
+      if(PM(ArrayType, pt->getElementType(), at)){
+        cout << "Yayyy\n";
+        at->dump();
+        Size = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, at->getNumElements()));
+      }
+      if(PM(GEPOperator, GEP->getOperand(0), GEP2)){
+        addChecks(GEP2, Inst);
+      }
+    }
+
+  } else {
+    cout << "It wasn't a GEP :( \n";
+    SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
+
+    if (!ObjSizeEval->bothKnown(SizeOffset)) {
+      errs() << "No, both are known .." << "\n";
+      ++ChecksUnable;
+      return;
+    }
+    Size   = SizeOffset.first;
+    Offset = SizeOffset.second;
   }
 
-  Value *Size   = SizeOffset.first;
-  Value *Offset = SizeOffset.second;
+
 
   ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
   ConstantInt *OffsetCI = dyn_cast<ConstantInt>(Offset);
@@ -366,13 +395,13 @@ void BoundsChecking::addAllChecks(Function &F) {
     Inst = *i;
 
     if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
-      addChecks(LI->getPointerOperand(), LI, Inst);
+      addChecks(LI->getPointerOperand(), Inst);
     } else if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
-      addChecks(SI->getPointerOperand(), SI, Inst);
+      addChecks(SI->getPointerOperand(), Inst);
     } else if (AtomicCmpXchgInst *AI = dyn_cast<AtomicCmpXchgInst>(Inst)) {
-      addChecks(AI->getPointerOperand(), AI, Inst);
+      addChecks(AI->getPointerOperand(), Inst);
     } else if (AtomicRMWInst *AI = dyn_cast<AtomicRMWInst>(Inst)) {
-      addChecks(AI->getPointerOperand(), AI, Inst);
+      addChecks(AI->getPointerOperand(), Inst);
     } else {
       llvm_unreachable("unknown Instruction type");
     }
@@ -643,6 +672,7 @@ static ICmpInst *getLoopTest(Loop *L) {
 }
 
 CheckPoint* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
+#define myreturn(rv) do { typeof(rv) rv_ = (rv);cp->name = rv_; if(rv_) return cp;} while(0)
   CheckPoint *cp = new CheckPoint(NULL, a.bound, a.isUpper, NULL);
   if(canon && a.name == canon) {
     if(a.isUpper) {
@@ -653,32 +683,30 @@ CheckPoint* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
           cout << "bepa\n";
           if(test->getSignedPredicate() == CmpInst::ICMP_SLT){
             cout << "cepa\n";
-            cp->name = test->getOperand(1);
             Type *IntTy = a.bound->getType();
             cp->bound = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, a.bound->getValue() + 1));
+            myreturn(test->getOperand(1));
           }
           if(test->getSignedPredicate() == CmpInst::ICMP_SLE){
-            cp->name = test->getOperand(1);
+            myreturn(test->getOperand(1));
           }
         }
       }
     }
     else {
       Type *IntTy = a.name->getType();
-      cp->name = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0));
+      myreturn(dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0)));
     }
   }
   if(l->isLoopInvariant(a.name)) {
-    cp->name = a.name;
+    myreturn(a.name);
   }
   if(a.isUpper) {
-    cp->name = isDec(a.name, l);
+    myreturn(isDec(a.name, l));
   } else {
-    cp->name = isInc(a.name, l);
+    myreturn(isInc(a.name, l));
   }
-  if(cp->name)
-    return cp;
-  else return NULL;
+  return NULL;
 }
 
 bool dominatesExits(BasicBlock* BB, DominatorTree &dt, Loop* l) {
