@@ -42,6 +42,9 @@ static cl::opt<bool> TrapDontCheckConstants("apa",
 static cl::opt<bool> DontOptimize("bounds-no-optimize",
                                   cl::desc("Don't do any optimizations"));
 
+static cl::opt<bool> DontOptimizeMore("bounds-no-optimize-more",
+                                  cl::desc("Don't do any extra optimizations"));
+
 STATISTIC(ChecksAdded, "Bounds checks added");
 STATISTIC(ChecksSkipped, "Bounds checks skipped");
 STATISTIC(ChecksUnable, "Bounds checks unable to add");
@@ -167,6 +170,72 @@ char BoundsChecking::ID = 0;
 /* INITIALIZE_PASS(BoundsChecking, "bounds-checking2", "Run-time bounds checking", */
 /*                 false, false) */
 
+bool same_types(const CheckPoint &c1, const CheckPoint &c2) {
+  if(c1.name != c2.name) return false;
+  if(c1.isUpper != c2.isUpper) return false;
+  return true;
+}
+
+// Example: arg1@(i < 100) subsumes arg2@(i < 200)
+// also:    arg1@(i < 100) subsumes arg2@(i < 100)
+//
+// subsumes((i < 100), (i < 200)) ==> true
+bool subsumes(const CheckPoint &a, const CheckPoint &b) {
+  if(!same_types(a, b)) return false;
+  return ( a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))
+      || (!a.isUpper && (a.bound->getValue().sge(b.bound->getValue())));
+}
+
+CheckSet cp_union(CheckSet a, const CheckSet &b) {
+  tr(it, b){
+    CheckType ct = it->first;
+    if(a.count(ct)) {
+      if(subsumes(it->second, a[ct])){
+        a[ct] = it->second;
+      }
+    }
+    else {
+      a[ct] = it->second;
+    }
+  }
+  return a;
+}
+
+CheckSet cp_intersect(CheckSet &a, CheckSet &b) {
+  CheckSet r;
+  tr(it, a){
+    CheckType ct = it->first;
+    if(b.count(ct)) {
+      if(subsumes(b[ct], it->second)){
+        r[ct] = b[ct];
+      } else {
+        r[ct] = a[ct];
+      }
+    }
+  }
+  return r;
+}
+
+void vec_union(vector < CheckPoint > & cps, const CheckSet &s) {
+  tr(c_prime, s) {
+    bool subsumed = false;
+    tr(c, cps) {
+      if(same_types(c_prime->second, *c)){
+        if(subsumes(c_prime->second, *c)){
+          c->bound = c_prime->second.bound;
+        }
+        subsumed = true;
+        break;
+      }
+    }
+    if(!subsumed) {
+      CheckPoint copy(c_prime->second);
+      copy.point = NULL;
+      cps.push_back(copy);
+    }
+  }
+}
+
 
 /// getTrapBB - create a basic block that traps. All overflowing conditions
 /// branch to this block. There's only one trap block per function.
@@ -256,6 +325,18 @@ bool BoundsChecking::synthesize(CheckPoint c) {
 
 Value* backtrace(Value *Offset,
                  APInt &minn,
+                 APInt &maxx);
+Value* backtrace2(Value *Offset,
+                 APInt &minn,
+                 APInt &maxx) {
+  if(DontOptimizeMore){
+    return Offset;
+  } else {
+    return backtrace(Offset, minn, maxx);
+  }
+}
+Value* backtrace(Value *Offset,
+                 APInt &minn,
                  APInt &maxx) {
 #define PM(Class) Class *i = dyn_cast<Class>(Offset)
   if(PM(BinaryOperator)){
@@ -276,18 +357,18 @@ Value* backtrace(Value *Offset,
     if(i->getOpcode() == Instruction::Add){
       minn -= c;
       maxx -= c;
-      return backtrace(other, minn, maxx);
+      return backtrace2(other, minn, maxx);
     }
     else if(i->getOpcode() == Instruction::Sub){
       if(other == lhs) {
         minn += c;
         maxx += c;
-        return backtrace(other, minn, maxx);
+        return backtrace2(other, minn, maxx);
       } else {
         minn -= c;
         maxx -= c;
         swap(minn, maxx);
-        return backtrace(other, minn, maxx);
+        return backtrace2(other, minn, maxx);
       }
     }
 
@@ -297,7 +378,7 @@ Value* backtrace(Value *Offset,
       }
       minn = (minn+c-1).sdiv(c);
       maxx = maxx.sdiv(c);
-      return backtrace(other, minn, maxx);
+      return backtrace2(other, minn, maxx);
     }
   } else if(PM(SExtInst)) {
     Value *v = i->getOperand(0);
@@ -305,7 +386,7 @@ Value* backtrace(Value *Offset,
     minn = minn.sextOrTrunc(t->getBitWidth());
     maxx = maxx.sextOrTrunc(t->getBitWidth());
 
-    return backtrace(v, minn, maxx);
+    return backtrace2(v, minn, maxx);
   }
   return Offset;
 }
@@ -319,29 +400,32 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
   Value *Offset;
 
 
-  if (GEPOperator *GEP = dyn_cast<GEPOperator>(Ptr)) {
+  bool success=false;
+  if (GEPOperator *GEP = DontOptimizeMore || DontOptimize ? NULL : dyn_cast<GEPOperator>(Ptr)) {
+    cout << "apaaaaaa\n";
     int n = GEP->getNumOperands();
     Offset = GEP->getOperand(n-1);
     Type *IntTy = Offset->getType();
     Type *type = GEP->getPointerOperandType();
-    type->dump();
-    cout << "\n";
 #undef PM
 #define PM(class, in, out) class *out = dyn_cast<class>(in)
     if(PM(PointerType, type, pt)){
-      cout << " 1 Yayyy\n";
+      cout << "beepaaaaaa\n";
+      pt->dump();
+      cout << "\n";
       if(PM(ArrayType, pt->getElementType(), at)){
-        cout << "Yayyy\n";
+        success= true;
         at->dump();
+        cout << "\n";
         Size = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, at->getNumElements()));
-      }
-      if(PM(GEPOperator, GEP->getOperand(0), GEP2)){
-        addChecks(GEP2, Inst);
+        if(PM(GEPOperator, GEP->getOperand(0), GEP2)){
+          addChecks(GEP2, Inst);
+        }
       }
     }
 
-  } else {
-    cout << "It wasn't a GEP :( \n";
+  } 
+  if(!success){
     SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
 
     if (!ObjSizeEval->bothKnown(SizeOffset)) {
@@ -408,52 +492,6 @@ void BoundsChecking::addAllChecks(Function &F) {
   }
 }
 
-bool same_types(const CheckPoint &c1, const CheckPoint &c2) {
-  if(c1.name != c2.name) return false;
-  if(c1.isUpper != c2.isUpper) return false;
-  return true;
-}
-
-// Example: arg1@(i < 100) subsumes arg2@(i < 200)
-// also:    arg1@(i < 100) subsumes arg2@(i < 100)
-//
-// subsumes((i < 100), (i < 200)) ==> true
-bool subsumes(const CheckPoint &a, const CheckPoint &b) {
-  if(!same_types(a, b)) return false;
-  return ( a.isUpper && (a.bound->getValue().sle(b.bound->getValue())))
-      || (!a.isUpper && (a.bound->getValue().sge(b.bound->getValue())));
-}
-
-CheckSet cp_union(CheckSet a, const CheckSet &b) {
-  tr(it, b){
-    CheckType ct = it->first;
-    if(a.count(ct)) {
-      if(subsumes(it->second, a[ct])){
-        a[ct] = it->second;
-      }
-    }
-    else {
-      a[ct] = it->second;
-    }
-  }
-  return a;
-}
-
-CheckSet cp_intersect(CheckSet &a, CheckSet &b) {
-  CheckSet r;
-  tr(it, a){
-    CheckType ct = it->first;
-    if(b.count(ct)) {
-      if(subsumes(b[ct], it->second)){
-        r[ct] = b[ct];
-      } else {
-        r[ct] = a[ct];
-      }
-    }
-  }
-  return r;
-}
-
 void BoundsChecking::localElimination(Function &F) {
   tr(it,F) {
     /* errs() << "ytterssta\n"; */
@@ -516,21 +554,24 @@ void BoundsChecking::redundancyCreation(Function &F) {
   tr(it, F) {
     BasicBlock *BB = &(*it);
     vector < CheckPoint > &cps = checkpoints[BB];
+    //BB->dump();
+
     CheckSet c_in;
     bool first = true;
     tr_succ(prit, BB) {
       if(first) { first=false; c_in = c_out[*prit]; }
       else c_in = cp_intersect(c_in, c_out[*prit]);
     }
-    tr(c, cps) {
-      tr(c_prime, c_in) {
-        if(subsumes(c_prime->second, *c)){
-          cout << "Removed in redundancyElimination\n";
-          c->bound = c_prime->second.bound;
-          break;
-        }
-      }
-    }
+    vec_union(cps, c_in);
+    /* tr(c, cps) { */
+    /*   tr(c_prime, c_in) { */
+    /*     if(subsumes(c_prime->second, *c)){ */
+    /*       cout << "Removed in redundancyElimination\n"; */
+    /*       c->bound = c_prime->second.bound; */
+    /*       break; */
+    /*     } */
+    /*   } */
+    /* } */
   }
 }
 
@@ -745,25 +786,6 @@ bool isDominatorBlock(BasicBlock* BB, DominatorTree &dt, Loop* l) {
   return run;
 }
 
-void vec_union(vector < CheckPoint > & cps, const CheckSet &s) {
-  tr(c_prime, s) {
-    bool subsumed = false;
-    tr(c, cps) {
-      if(same_types(c_prime->second, *c)){
-        if(subsumes(c_prime->second, *c)){
-          c->bound = c_prime->second.bound;
-        }
-        subsumed = true;
-        break;
-      }
-    }
-    if(!subsumed) {
-      CheckPoint copy(c_prime->second);
-      copy.point = NULL;
-      cps.push_back(copy);
-    }
-  }
-}
 
 void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
   cout << "Entered loopHoist\n";
@@ -832,6 +854,8 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     BasicBlock *BB = *it;
     vector < CheckPoint > &cps = checkpoints[BB];
     if(dominatesExits(BB, dt, loop)) {
+      cout << "This block dominates all exits\n";
+      BB->dump();
       CheckSet C;
       tr(it, cps) {
         if(CheckPoint *cp = canHoist(*it, loop, canon)) {
@@ -888,6 +912,9 @@ bool BoundsChecking::runOnFunction(Function &F) {
       /* assert(it->first == c.point->getParent()); */
       if(c.point == NULL) {
         c.point = it->first->getFirstNonPHI();
+        if(Instruction *ins = dyn_cast<Instruction>(c.name)){
+          assert(ins->getParent() != it->first);
+        }
       }
       assert(c.point);
       Builder->SetInsertPoint(c.point);
