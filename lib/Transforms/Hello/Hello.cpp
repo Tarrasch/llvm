@@ -39,6 +39,9 @@ static cl::opt<bool> SingleTrapBB("bounds-checking-single-trap-2",
 static cl::opt<bool> TrapDontCheckConstants("apa",
                                   cl::desc("Kolla om constant"));
 
+static cl::opt<bool> DontOptimize("bounds-no-optimize",
+                                  cl::desc("Don't do any optimizations"));
+
 STATISTIC(ChecksAdded, "Bounds checks added");
 STATISTIC(ChecksSkipped, "Bounds checks skipped");
 STATISTIC(ChecksUnable, "Bounds checks unable to add");
@@ -239,7 +242,7 @@ bool BoundsChecking::synthesize(CheckPoint c) {
   Value *Cmp;
   if(c.isUpper) {
     // TODO: check edge cases
-    Cmp = Builder->CreateICmpSLT(c.bound, c.name);
+    Cmp = Builder->CreateICmpSLE(c.bound, c.name);
     /* errs() << "Syntesiezing ubound\n"; */
   } else {
     Cmp = Builder->CreateICmpSLT(c.name, c.bound);
@@ -575,7 +578,6 @@ bool isIncDec(Value* curr_val, Loop* l, bool is_inc) {
 #define PMa(Class) Class *i = dyn_cast<Class>( curr_val)
 #define recurse(val) isIncDec(val, l, is_inc)
   if(PMa(BinaryOperator)){
-    cout << "Binop \n";
     Value *lhs = i->getOperand(0);
     Value *rhs = i->getOperand(1);
 
@@ -609,7 +611,6 @@ bool isIncDec(Value* curr_val, Loop* l, bool is_inc) {
     }
   }
   if(PMa(PHINode)){
-    cout << "PHINode \n";
     for(unsigned j=0; j < i->getNumIncomingValues(); ++j){
       Value *new_val = i->getIncomingValue(j);
       if(l->isLoopInvariant(new_val)) {
@@ -641,29 +642,43 @@ static ICmpInst *getLoopTest(Loop *L) {
   return dyn_cast<ICmpInst>(BI->getCondition());
 }
 
-Value* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
+CheckPoint* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
+  CheckPoint *cp = new CheckPoint(NULL, a.bound, a.isUpper, NULL);
   if(canon && a.name == canon) {
     if(a.isUpper) {
       if(ICmpInst* test = getLoopTest(l)) {
-        if(test->getOperand(0) == a.name)
-          return test->getOperand(1);
-        else if(test->getOperand(1) == a.name)
-          return test->getOperand(0);
+        test->dump();
+        cout << "apa\n";
+        if(test->getOperand(0) == a.name) {
+          cout << "bepa\n";
+          if(test->getSignedPredicate() == CmpInst::ICMP_SLT){
+            cout << "cepa\n";
+            cp->name = test->getOperand(1);
+            Type *IntTy = a.bound->getType();
+            cp->bound = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, a.bound->getValue() + 1));
+          }
+          if(test->getSignedPredicate() == CmpInst::ICMP_SLE){
+            cp->name = test->getOperand(1);
+          }
+        }
       }
     }
     else {
       Type *IntTy = a.name->getType();
-      return dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0));
+      cp->name = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0));
     }
   }
   if(l->isLoopInvariant(a.name)) {
-    return a.name;
+    cp->name = a.name;
   }
   if(a.isUpper) {
-    return isDec(a.name, l);
+    cp->name = isDec(a.name, l);
   } else {
-    return isInc(a.name, l);
+    cp->name = isInc(a.name, l);
   }
+  if(cp->name)
+    return cp;
+  else return NULL;
 }
 
 bool dominatesExits(BasicBlock* BB, DominatorTree &dt, Loop* l) {
@@ -743,6 +758,7 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
       }
     }
   }
+  cout << "scooby\n";
   bool change = true;
   while(change) {
     /* cout << "ScoobyDoo\n"; */
@@ -790,8 +806,8 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     if(dominatesExits(BB, dt, loop)) {
       CheckSet C;
       tr(it, cps) {
-        if(Value *b = canHoist(*it, loop, canon)) {
-          C[it->getCT()] = CheckPoint(b, it->bound, it->isUpper, NULL);
+        if(CheckPoint *cp = canHoist(*it, loop, canon)) {
+          C[it->getCT()] = *cp;
           cps.erase(it);
           it--;
         }
@@ -830,8 +846,10 @@ bool BoundsChecking::runOnFunction(Function &F) {
   // touching instructions
   addAllChecks(F);
 
-  localElimination(F);
-  globalElimination(F);
+  if(!DontOptimize) {
+    localElimination(F);
+    globalElimination(F);
+  }
 
   bool MadeChange = false;
   tr(it, checkpoints) {
