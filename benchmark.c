@@ -16,22 +16,25 @@
  * =====================================================================================
  */
 #include <stdlib.h>
-#define M 20
-#define N 20
-#define K 20
+#define M 2000
+#define N 2000
+#define K 200
 
 #define foru(ii, n) for (int ii = 0; ii < n; ii++)
 
-int a[M][N];
-int b[N][K];
 
-int res[M][K];
-
+void other() ;
 int main(){
+  other();
 }
 
 // a*b
 void other() {
+  int a[M][N];
+  int b[N][K];
+
+  int res[M][K];
+
   foru(i, M) {
     foru(k, K){
       int sum = 0;

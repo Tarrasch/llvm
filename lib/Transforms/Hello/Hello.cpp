@@ -216,7 +216,7 @@ CheckSet cp_intersect(CheckSet &a, CheckSet &b) {
   return r;
 }
 
-void vec_union(vector < CheckPoint > & cps, const CheckSet &s) {
+void vec_union(vector < CheckPoint > & cps, const CheckSet &s, bool do_create) {
   tr(c_prime, s) {
     bool subsumed = false;
     tr(c, cps) {
@@ -228,7 +228,7 @@ void vec_union(vector < CheckPoint > & cps, const CheckSet &s) {
         break;
       }
     }
-    if(!subsumed) {
+    if(!subsumed && do_create) {
       CheckPoint copy(c_prime->second);
       copy.point = NULL;
       cps.push_back(copy);
@@ -402,7 +402,6 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
 
   bool success=false;
   if (GEPOperator *GEP = DontOptimizeMore || DontOptimize ? NULL : dyn_cast<GEPOperator>(Ptr)) {
-    cout << "apaaaaaa\n";
     int n = GEP->getNumOperands();
     Offset = GEP->getOperand(n-1);
     Type *IntTy = Offset->getType();
@@ -410,14 +409,10 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
 #undef PM
 #define PM(class, in, out) class *out = dyn_cast<class>(in)
     if(PM(PointerType, type, pt)){
-      cout << "beepaaaaaa\n";
-      pt->dump();
-      cout << "\n";
       if(PM(ArrayType, pt->getElementType(), at)){
         success= true;
-        at->dump();
-        cout << "\n";
         Size = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, at->getNumElements()));
+        assert(at->getNumElements() > 0);
         if(PM(GEPOperator, GEP->getOperand(0), GEP2)){
           addChecks(GEP2, Inst);
         }
@@ -426,10 +421,11 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
 
   } 
   if(!success){
+    /* cout << "Used fallback!\n"; */
     SizeOffsetEvalType SizeOffset = ObjSizeEval->compute(Ptr);
 
     if (!ObjSizeEval->bothKnown(SizeOffset)) {
-      errs() << "No, both are known .." << "\n";
+      /* errs() << "Both are not known .." << "\n"; */
       ++ChecksUnable;
       return;
     }
@@ -440,16 +436,41 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
 
 
   ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
+  if (SizeCI && SizeCI->getValue() == 0) {
+    //TODO: add more extensive checks
+    return;
+  }
+  if (!SizeCI || SizeCI->getValue().slt(0)) {
+    //TODO: add more extensive checks
+    return;
+  }
   ConstantInt *OffsetCI = dyn_cast<ConstantInt>(Offset);
   if (OffsetCI && OffsetCI->getValue() == 0) {
     //TODO: add more extensive checks
     return;
   }
 
+  /* cout << "\n*****************************\n"; */
+  /* Inst -> getParent() ->dump(); */
+  /* Size -> dump(); */
+  /* SizeCI -> dump(); */
+  /* Offset -> dump(); */
+  /* Ptr->dump(); */
+  /* Ptr->getType()->dump(); */
+  /* Inst->dump(); */
+  /* cout << "\n*****************************\n"; */
+
+  if(PM(PointerType, Ptr->getType(), pt)){
+    if(PM(PointerType, pt, pt2)){
+      return;
+    }
+  }
+
+
   Type *IntTy = Offset->getType();
   APInt minn = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0))->getValue();
   APInt maxx = SizeCI->getValue();
-  Offset = backtrace(Offset, minn, maxx);
+  /* Offset = backtrace(Offset, minn, maxx); */
   IntTy = Offset->getType();
   ConstantInt *minCI = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, minn));
   ConstantInt *maxCI = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, maxx));
@@ -562,7 +583,7 @@ void BoundsChecking::redundancyCreation(Function &F) {
       if(first) { first=false; c_in = c_out[*prit]; }
       else c_in = cp_intersect(c_in, c_out[*prit]);
     }
-    vec_union(cps, c_in);
+    vec_union(cps, c_in, false);
     /* tr(c, cps) { */
     /*   tr(c_prime, c_in) { */
     /*     if(subsumes(c_prime->second, *c)){ */
@@ -613,7 +634,6 @@ void BoundsChecking::redundancyElimination(Function &F) {
         /* c_prime->second.dump(); */
         /* c->dump(); */
         if(subsumes(c_prime->second, *c)){
-          cout << "Removed in redundancyElimination\n";
           cps.erase(c);
           c--;
           break;
@@ -718,12 +738,8 @@ CheckPoint* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
   if(canon && a.name == canon) {
     if(a.isUpper) {
       if(ICmpInst* test = getLoopTest(l)) {
-        test->dump();
-        cout << "apa\n";
         if(test->getOperand(0) == a.name) {
-          cout << "bepa\n";
           if(test->getSignedPredicate() == CmpInst::ICMP_SLT){
-            cout << "cepa\n";
             Type *IntTy = a.bound->getType();
             cp->bound = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, a.bound->getValue() + 1));
             myreturn(test->getOperand(1));
@@ -788,7 +804,6 @@ bool isDominatorBlock(BasicBlock* BB, DominatorTree &dt, Loop* l) {
 
 
 void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
-  cout << "Entered loopHoist\n";
   const vector < Loop* > & subs = loop->getSubLoops();
   tr(sub, subs) {
     if((*sub)->getLoopDepth() == loop->getLoopDepth() + 1) {
@@ -808,7 +823,6 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
       }
     }
   }
-  cout << "scooby\n";
   bool change = true;
   while(change) {
     /* cout << "ScoobyDoo\n"; */
@@ -828,7 +842,7 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
         if(!prop.empty()) {
           change = true;
 
-          vec_union(cps, prop);
+          vec_union(cps, prop, true);
           tr_succ(prit, BB) {
             if(isExit(*prit, loop))
               continue;
@@ -854,8 +868,6 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     BasicBlock *BB = *it;
     vector < CheckPoint > &cps = checkpoints[BB];
     if(dominatesExits(BB, dt, loop)) {
-      cout << "This block dominates all exits\n";
-      BB->dump();
       CheckSet C;
       tr(it, cps) {
         if(CheckPoint *cp = canHoist(*it, loop, canon)) {
@@ -865,7 +877,7 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
         }
       }
       BasicBlock* before = loop->getLoopPredecessor();
-      vec_union(checkpoints[before], C);
+      vec_union(checkpoints[before], C, true);
     }
   }
 }
