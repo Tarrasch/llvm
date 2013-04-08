@@ -45,7 +45,8 @@ do
     echo $STATFILE
     # /usr/bin/time --output=$STATFILE lli $OUT.o.opt $RUN_OPTIONS
     toexec="./a.out $RUN_OPTIONS"
-    eval /usr/bin/time --output=$STATFILE --format="%e" $toexec
+    eval $toexec
+    eval /usr/bin/time --append --output=$STATFILE --format="%e" $toexec
     rm a.out
     rm *.o*
 

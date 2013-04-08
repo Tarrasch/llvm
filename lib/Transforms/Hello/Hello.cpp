@@ -470,7 +470,9 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
   Type *IntTy = Offset->getType();
   APInt minn = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0))->getValue();
   APInt maxx = SizeCI->getValue();
-  /* Offset = backtrace(Offset, minn, maxx); */
+  if(DontOptimize) {
+    Offset = backtrace(Offset, minn, maxx);
+  }
   IntTy = Offset->getType();
   ConstantInt *minCI = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, minn));
   ConstantInt *maxCI = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, maxx));
