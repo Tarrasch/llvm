@@ -279,7 +279,7 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   // check if the comparison is always false
   ConstantInt *C = dyn_cast_or_null<ConstantInt>(Cmp);
   if (C && !TrapDontCheckConstants) {
-    errs() << "Skipping check" << "\n";
+    /* errs() << "Skipping check" << "\n"; */
     ++ChecksSkipped;
     if (!C->getZExtValue()) {
       return;
@@ -437,31 +437,35 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
 
   ConstantInt *SizeCI = dyn_cast<ConstantInt>(Size);
   if (SizeCI && SizeCI->getValue() == 0) {
+    cout << "return 1\n";
     //TODO: add more extensive checks
     return;
   }
   if (!SizeCI || SizeCI->getValue().slt(0)) {
+    cout << "return 2\n";
     //TODO: add more extensive checks
     return;
   }
   ConstantInt *OffsetCI = dyn_cast<ConstantInt>(Offset);
   if (OffsetCI && OffsetCI->getValue() == 0) {
+    /* cout << "return 3\n"; */
     //TODO: add more extensive checks
     return;
   }
 
-  /* cout << "\n*****************************\n"; */
-  /* Inst -> getParent() ->dump(); */
-  /* Size -> dump(); */
-  /* SizeCI -> dump(); */
-  /* Offset -> dump(); */
-  /* Ptr->dump(); */
-  /* Ptr->getType()->dump(); */
-  /* Inst->dump(); */
-  /* cout << "\n*****************************\n"; */
+/*   cout << "\n*****************************\n"; */
+/*   Inst -> getParent() ->dump(); */
+/*   Size -> dump(); */
+/*   SizeCI -> dump(); */
+/*   Offset -> dump(); */
+/*   Ptr->dump(); */
+/*   Ptr->getType()->dump(); */
+/*   Inst->dump(); */
+/*   cout << "\n*****************************\n"; */
 
   if(PM(PointerType, Ptr->getType(), pt)){
-    if(PM(PointerType, pt, pt2)){
+    if(PM(ArrayType, pt->getElementType(), pt2)){
+      cout << "return 4\n";
       return;
     }
   }
@@ -721,12 +725,15 @@ bool isIncDec(Value* curr_val, Loop* l, bool is_inc) {
 
 /// Return the compare guarding the loop latch, or NULL for unrecognized tests.
 static ICmpInst *getLoopTest(Loop *L) {
-  assert(L->getExitingBlock() && "expected loop exit");
+  /* assert(L->getExitingBlock() && "expected loop exit"); */
+  if(!L->getExitingBlock()) {
+    return NULL;
+  }
 
   BasicBlock *LatchBlock = L->getLoopLatch();
   // Don't bother with LFTR if the loop is not properly simplified.
   if (!LatchBlock)
-    return 0;
+    return NULL;
 
   BranchInst *BI = dyn_cast<BranchInst>(L->getExitingBlock()->getTerminator());
   assert(BI && "expected exit branch");
@@ -903,6 +910,7 @@ bool BoundsChecking::runOnFunction(Function &F) {
   TLI = &getAnalysis<TargetLibraryInfo>();
 
   TrapBB = 0;
+  checkpoints.clear();
   BuilderTy TheBuilder(F.getContext(), TargetFolder(TD));
   Builder = &TheBuilder;
   ObjectSizeOffsetEvaluator TheObjSizeEval(TD, TLI, F.getContext());
@@ -918,16 +926,24 @@ bool BoundsChecking::runOnFunction(Function &F) {
   }
 
   bool MadeChange = false;
+  /* cout << "apa\n"; */
   tr(it, checkpoints) {
+    /* cout << "bepa\n"; */
     tr(it2, it->second) {
+      /* cout << "cepa\n"; */
       CheckPoint c = *it2;
       /* it->first->dump(); */
       /* c.point->getParent()->dump(); */
       /* assert(it->first == c.point->getParent()); */
       if(c.point == NULL) {
+            continue;
         c.point = it->first->getFirstNonPHI();
         if(Instruction *ins = dyn_cast<Instruction>(c.name)){
-          assert(ins->getParent() != it->first);
+          if(ins->getParent() != it->first) {
+            /* typeof(ins->getParent()->end()) myit = ins->getParent()->end(); */
+            /* myit--; */
+            /* c.point = &(*(myit)); */
+          }
         }
       }
       assert(c.point);

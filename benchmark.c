@@ -25,20 +25,26 @@
 
 void other() ;
 int main(){
-  other();
 }
+
+int simple(int b) {
+  int arr[100];
+  return arr[b] + arr[b+10];
+}
+
+/* void other() { */
+/*   int a[100]; */
+/*   a[4] = 0; */
+/* } */
 
 // a*b
 void other() {
   int a[M][N];
   int b[N][K];
-
   int res[M][K];
-
   foru(i, M) {
     foru(k, K){
       int sum = 0;
-
       foru(j, N) {
         sum += a[i][j] * b[j][k];
       }
@@ -46,6 +52,7 @@ void other() {
     }
   }
 }
+
 /* void matrix_mul() { */
 /*   /1* foru(i, M) { *1/ */
 /*   /1*   foru(k, K){ *1/ */

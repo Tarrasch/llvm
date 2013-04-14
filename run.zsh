@@ -30,6 +30,9 @@ do
     $TOOLS/llvm-link *.o > $OUT.o
     # cp dijkstra.o $OUT.o
     echo "Compiling ..."
+    banner $i
+    banner $PARAMS
+    echo $PARAMS
     if [[ "$PARAMS" = 'xxx' ]]
     then
       eval "$TOOLS/opt $OUT.o -mem2reg > $OUT.o.opt"
