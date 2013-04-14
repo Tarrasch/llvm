@@ -465,7 +465,7 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
 
   if(PM(PointerType, Ptr->getType(), pt)){
     if(PM(ArrayType, pt->getElementType(), pt2)){
-      cout << "return 4\n";
+      /* cout << "return 4\n"; */
       return;
     }
   }
@@ -636,7 +636,7 @@ void BoundsChecking::redundancyElimination(Function &F) {
     /* cs_dump(c_in); */
     tr(c, cps) {
       tr(c_prime, c_in) {
-        cout << "\n\n";
+        /* cout << "\n\n"; */
         /* c_prime->second.dump(); */
         /* c->dump(); */
         if(subsumes(c_prime->second, *c)){
@@ -820,6 +820,9 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     }
   }
 
+  if(!loop->getExitingBlock()){
+    return;
+  }
   PHINode* canon = loop->getCanonicalInductionVariable();
   map< BasicBlock*, CheckSet > C;
   tr_block(bit, *loop) {
@@ -936,14 +939,15 @@ bool BoundsChecking::runOnFunction(Function &F) {
       /* c.point->getParent()->dump(); */
       /* assert(it->first == c.point->getParent()); */
       if(c.point == NULL) {
-            continue;
         c.point = it->first->getFirstNonPHI();
         if(Instruction *ins = dyn_cast<Instruction>(c.name)){
-          if(ins->getParent() != it->first) {
-            /* typeof(ins->getParent()->end()) myit = ins->getParent()->end(); */
-            /* myit--; */
-            /* c.point = &(*(myit)); */
+          if(ins->getParent() == it->first) {
+            typeof(ins->getParent()->end()) myit = ins->getParent()->end();
+            myit--;
+            c.point = &(*(myit));
           }
+        } else {
+          /* cout << "NULL &&& Not an instruction \n"; */
         }
       }
       assert(c.point);

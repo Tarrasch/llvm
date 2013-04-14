@@ -24,6 +24,22 @@
 
 
 void other() ;
+
+/* static void save_root() */
+/* { */
+/*   int		newword[100]; */
+/*   int *	p; */
+/*   int			i; */
+/*   int			limit; */
+
+/*   for (p = newword + i;  i < limit;  i++, p++) */
+/*     *p = (*p); */
+/*   return; */
+/* } */
+
+
+#define ichar_t char
+
 int main(){
 }
 
@@ -38,20 +54,20 @@ int simple(int b) {
 /* } */
 
 // a*b
-void other() {
-  int a[M][N];
-  int b[N][K];
-  int res[M][K];
-  foru(i, M) {
-    foru(k, K){
-      int sum = 0;
-      foru(j, N) {
-        sum += a[i][j] * b[j][k];
-      }
-      res[i][k] = sum;
-    }
-  }
-}
+/* void other() { */
+/*   int a[M][N]; */
+/*   int b[N][K]; */
+/*   int res[M][K]; */
+/*   foru(i, M) { */
+/*     foru(k, K){ */
+/*       int sum = 0; */
+/*       foru(j, N) { */
+/*         sum += a[i][j] * b[j][k]; */
+/*       } */
+/*       res[i][k] = sum; */
+/*     } */
+/*   } */
+/* } */
 
 /* void matrix_mul() { */
 /*   /1* foru(i, M) { *1/ */
