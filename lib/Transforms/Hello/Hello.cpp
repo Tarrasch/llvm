@@ -788,6 +788,16 @@ CheckPoint* canHoist(const CheckPoint &a, Loop* l, PHINode* canon) {
   return NULL;
 }
 
+// 1 or more
+bool hasExits(Loop* l) {
+  SmallVector<BasicBlock *, 4> ExitBlocks;
+  l->getExitBlocks(ExitBlocks);
+  tr(exit, ExitBlocks) {
+    return true;
+  }
+  return false;
+}
+
 bool dominatesExits(BasicBlock* BB, DominatorTree &dt, Loop* l) {
   SmallVector<BasicBlock *, 4> ExitBlocks;
   l->getExitBlocks(ExitBlocks);
@@ -833,7 +843,7 @@ void BoundsChecking::loopHoist(Loop* loop, DominatorTree &dt) {
     }
   }
 
-  if(!loop->getExitingBlock()){
+  if(!hasExits(loop)){
     return;
   }
   PHINode* canon = loop->getCanonicalInductionVariable();
