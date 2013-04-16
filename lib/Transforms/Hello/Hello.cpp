@@ -80,10 +80,12 @@ namespace {
       : name(NULL), bound(NULL), isUpper(false), point(NULL) {}
 
     void dump() const {
+      /*
       if(isUpper)
         cout << "i <= " << bound->getValue() << "\n";
       else
         cout << bound->getValue() << " <= i\n";
+        */
       cout << bound->getValue() << (isUpper ? " > " : " < ") << " ";
       name->dump();
     }
@@ -279,11 +281,13 @@ void BoundsChecking::emitBranchToTrap(Value *Cmp) {
   // check if the comparison is always false
   ConstantInt *C = dyn_cast_or_null<ConstantInt>(Cmp);
   if (C && !TrapDontCheckConstants) {
-    /* errs() << "Skipping check" << "\n"; */
+    errs() << "Skipping check" << "\n";
     ++ChecksSkipped;
     if (!C->getZExtValue()) {
       return;
     } else {
+      errs() << "Unconditional check" << "\n";
+      Cmp->dump();
       Cmp = NULL; // unconditional branch
     }
   }
@@ -330,8 +334,10 @@ Value* backtrace2(Value *Offset,
                  APInt &minn,
                  APInt &maxx) {
   if(DontOptimizeMore){
+    //cout << "stopping backtrace\n";
     return Offset;
   } else {
+    //cout << "continuing backtrace\n";
     return backtrace(Offset, minn, maxx);
   }
 }
@@ -339,11 +345,15 @@ Value* backtrace(Value *Offset,
                  APInt &minn,
                  APInt &maxx) {
 #define PM(Class) Class *i = dyn_cast<Class>(Offset)
+  ConstantInt *constant;
+  if(( constant = dyn_cast<ConstantInt>(Offset) )){
+    return constant;
+  }
+
   if(PM(BinaryOperator)){
     Value *lhs = i->getOperand(0);
     Value *rhs = i->getOperand(1);
 
-    ConstantInt *constant;
     Value *other;
     if(( constant = dyn_cast<ConstantInt>(lhs) )){
       other = rhs;
@@ -365,9 +375,10 @@ Value* backtrace(Value *Offset,
         maxx += c;
         return backtrace2(other, minn, maxx);
       } else {
-        minn -= c;
-        maxx -= c;
-        swap(minn, maxx);
+        APInt a=minn;
+        APInt b=maxx;
+        minn=c-b;
+        maxx=c-a;
         return backtrace2(other, minn, maxx);
       }
     }
@@ -474,7 +485,8 @@ void BoundsChecking::addChecks(Value *Ptr, Instruction *Inst) {
   Type *IntTy = Offset->getType();
   APInt minn = dyn_cast_or_null<ConstantInt>(ConstantInt::get(IntTy, 0))->getValue();
   APInt maxx = SizeCI->getValue();
-  if(DontOptimize) {
+  if(!DontOptimize) {
+    //cout << "backtraceing\n";
     Offset = backtrace(Offset, minn, maxx);
   }
   IntTy = Offset->getType();
@@ -521,17 +533,17 @@ void BoundsChecking::addAllChecks(Function &F) {
 
 void BoundsChecking::localElimination(Function &F) {
   tr(it,F) {
-    /* errs() << "ytterssta\n"; */
-    /* it->dump(); */
+    //errs() << "ytterssta\n";
+    //it->dump();
     BasicBlock *BB = &(*it);
     sort(all(checkpoints[BB]), &CheckPoint::positionComparator);
     tr(i,checkpoints[BB]) {
-      /* errs() << "\t"; */
-      /* i->point->dump(); */
+      //errs() << "\t";
+      //i->dump();
       assert(&(*it) == i->point->getParent());
       for (typeof(i) j = checkpoints[BB].begin(); j != i; j++) {
-        /* errs() << "\t\t"; */
-        /* j->point->dump(); */
+        //errs() << "\t\t";
+        //j->dump();
         assert(&(*it) == j->point->getParent());
         CheckPoint &a = *j;
         CheckPoint &b = *i;
@@ -554,6 +566,7 @@ vector < CheckPoint > forward(vector < CheckPoint > arg) {
 }
 
 void BoundsChecking::globalElimination(Function &F) {
+  //cout << "gelmin\n";
   redundancyCreation(F);
   redundancyElimination(F);
   loopRemovals(F);

@@ -18,8 +18,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* int main(){ */
-/* } */
+
 
 /* int pointers() { */
 /*   int arr[100][100]; */
@@ -101,7 +100,12 @@
 /*   return s; */
 /* } */
 
-/* int access(int b){ */
-/*   int arr[100]; */
-/*   return arr[b] + arr[b+1]; */
-/* } */
+int access(int b){
+  int arr[100];
+  return arr[b] + arr[b+1];
+}
+
+int main(){
+  access(10);
+}
+
